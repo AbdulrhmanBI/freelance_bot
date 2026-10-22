@@ -1,4 +1,4 @@
-name = "freelance-jobs-bot"
+name = "freelance-bot"
 main = "worker.js"
 compatibility_date = "2025-06-01"
 
