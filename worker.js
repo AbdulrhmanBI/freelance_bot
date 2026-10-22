@@ -1,4 +1,4 @@
-// ====================================================================
+// =====================================================================
 //  Freelance Jobs Bot  (Cloudflare Workers + Cron + D1)
 //  أي حد يفتح البوت ويدوس /start بيوصله المشاريع الجديدة.
 //  المواقع: كفيل، مستقل، نفذلي، خمسات، Freelancer (API)
@@ -10,7 +10,7 @@
 //    ADMIN_KEY       -> كلمة سر لصفحات /setup و الاختبار   (Secret)
 //    ADMIN_ID        -> اختياري: chat id بتاعك عشان أمر /stats
 //  Trigger: Cron "* * * * *"
-// ====================================================================
+// =====================================================================
 
 // ---- حدود الخطة المجانية (50 subrequest و 50 D1 query في كل تشغيلة) ----
 // لو عملت ترقية للخطة المدفوعة تقدر ترفع الأرقام دي بأمان.
@@ -180,144 +180,290 @@ const SITE_KEYS = SITES.map((s) => s.key);
 //  Cron: نجيب المشاريع الجديدة -> نحطها في الـ outbox -> نبعت دفعة
 // ---------------------------------------------------------------------
 async function run(env) {
-  const [state, users] = await withSchema(env, () => Promise.all([loadState(env), loadUsers(env)]));
+  const startedAt = Date.now();
+  const [state, users] = await withSchema(env, () =>
+    Promise.all([loadState(env), loadUsers(env)])
+  );
+
   const updates = {};
   const pending = []; // { key, text, chatIds }
   let processed = 0;
 
-  const lists = await Promise.allSettled(SITES.map((s) => s.list()));
+  console.log(`[run] started; activeUsers=${users.length}`);
+  if (!users.length) {
+    console.warn('[run] no active users found; no project notifications can be queued');
+  }
+
+  const lists = await Promise.allSettled(SITES.map((site) => site.list()));
 
   for (let i = 0; i < SITES.length; i++) {
     const site = SITES[i];
-    const r = lists[i];
-    if (r.status === "rejected") {
-      console.error(`[${site.key}] list failed:`, String(r.reason));
+    const result = lists[i];
+
+    if (result.status === 'rejected') {
+      console.error(`[${site.key}] list failed:`, String(result.reason));
       continue;
     }
-    const items = r.value;
+
+    const items = result.value;
+    const newestId = items.length
+      ? Math.max(...items.map((item) => Number(item.id) || 0))
+      : null;
+    console.log(
+      `[${site.key}] list found=${items.length}; ` +
+      `storedLastId=${state[site.key] ?? 'none'}; newestId=${newestId ?? 'none'}`
+    );
+
     if (!items.length) continue;
 
-    // أول تشغيل للموقع: نسجل أعلى ID من غير ما نبعت حاجة
+    // أول تشغيل للموقع: نسجل أعلى ID من غير إرسال المشاريع القديمة.
     if (state[site.key] == null) {
-      updates[site.key] = Math.max(...items.map((x) => x.id));
+      updates[site.key] = newestId;
+      console.warn(
+        `[${site.key}] first run: initialized last_id=${newestId}; ` +
+        'existing projects were intentionally not sent'
+      );
       continue;
     }
 
-    const fresh = items.filter((x) => x.id > state[site.key]).sort((a, b) => a.id - b.id);
-    let last = state[site.key];
+    const fresh = items
+      .filter((item) => Number(item.id) > Number(state[site.key]))
+      .sort((a, b) => Number(a.id) - Number(b.id));
+
+    console.log(`[${site.key}] freshProjects=${fresh.length}`);
+    if (!fresh.length) continue;
+
+    // استخدم تطابقًا كاملًا لاسم الموقع بدل substring.
+    const audience = users.filter((user) =>
+      String(user.sites || '').split(',').map((siteKey) => siteKey.trim()).includes(site.key)
+    );
+
+    if (!audience.length) {
+      const highestFreshId = Math.max(...fresh.map((item) => Number(item.id)));
+      updates[site.key] = highestFreshId;
+      console.warn(
+        `[${site.key}] no active subscribers selected this site; ` +
+        `skipping ${fresh.length} fresh projects and advancing last_id=${highestFreshId}`
+      );
+      continue;
+    }
+
+    let last = Number(state[site.key]);
 
     for (const item of fresh) {
-      if (processed >= MAX_NEW_PER_RUN) break;
-
-      // مين مهتم بالموقع ده؟ لو محدش، منضيعش طلبات على تفاصيله
-      const audience = users.filter((u) => u.sites.includes(site.key));
-      if (!audience.length) {
-        last = item.id;
-        continue;
+      if (processed >= MAX_NEW_PER_RUN) {
+        console.warn(
+          `[run] MAX_NEW_PER_RUN=${MAX_NEW_PER_RUN} reached; ` +
+          `remaining projects on ${site.key} will be checked on the next run`
+        );
+        break;
       }
 
       let full;
       try {
         full = site.detail ? await site.detail(item) : item;
-      } catch (e) {
-        console.error(`[${site.key}] detail failed #${item.id}:`, String(e));
-        full = { ...item, title: `مشروع جديد #${item.id}`, description: "", budget: "", skills: [], extra: [] };
+      } catch (error) {
+        console.error(`[${site.key}] detail failed #${item.id}:`, String(error));
+        full = {
+          ...item,
+          title: `مشروع جديد #${item.id}`,
+          description: '',
+          budget: '',
+          skills: [],
+          extra: [],
+        };
       }
 
-      const hay = `${full.title} ${full.description} ${(full.skills || []).join(" ")}`.toLowerCase();
-      const chatIds = audience.filter((u) => matchesKeywords(u.keywords, hay)).map((u) => u.chat_id);
+      const hay = `${full.title || ''} ${full.description || ''} ${(full.skills || []).join(' ')}`.toLowerCase();
+      const chatIds = audience
+        .filter((user) => matchesKeywords(user.keywords, hay))
+        .map((user) => user.chat_id);
+
+      processed++;
+      last = Number(item.id);
 
       if (chatIds.length) {
-        pending.push({ key: `${site.key}:${item.id}`, text: formatMessage(site, full), chatIds });
+        pending.push({
+          key: `${site.key}:${item.id}`,
+          text: formatMessage(site, full),
+          chatIds,
+        });
+        console.log(
+          `[${site.key}] project=${item.id} queuedForRecipients=${chatIds.length}`
+        );
+      } else {
+        console.log(
+          `[${site.key}] project=${item.id} skipped; no recipients matched keywords ` +
+          `(subscribers=${audience.length})`
+        );
       }
-      processed++;
-      last = item.id;
     }
 
-    if (last !== state[site.key]) updates[site.key] = last;
+    if (last !== Number(state[site.key])) {
+      updates[site.key] = last;
+    }
   }
+
+  const recipientCount = pending.reduce((total, project) => total + project.chatIds.length, 0);
+  console.log(
+    `[run] discovery complete; processed=${processed}; ` +
+    `pendingProjects=${pending.length}; pendingRecipients=${recipientCount}; ` +
+    `stateUpdates=${Object.keys(updates).length}`
+  );
 
   await enqueueAndSave(env, pending, updates);
   await flushOutbox(env);
+
+  console.log(`[run] completed in ${Date.now() - startedAt}ms`);
 }
 
 async function enqueueAndSave(env, pending, updates) {
   const now = Math.floor(Date.now() / 1000);
   const stmts = [];
-  for (const m of pending) {
+
+  for (const message of pending) {
     stmts.push(
-      env.DB.prepare("INSERT OR IGNORE INTO messages (key, text, created_at) VALUES (?1, ?2, ?3)").bind(m.key, m.text, now)
+      env.DB.prepare(
+        'INSERT OR IGNORE INTO messages (key, text, created_at) VALUES (?1, ?2, ?3)'
+      ).bind(message.key, message.text, now)
     );
     stmts.push(
-      env.DB.prepare("INSERT INTO outbox (chat_id, msg_key) SELECT value, ?1 FROM json_each(?2)").bind(
-        m.key,
-        JSON.stringify(m.chatIds)
-      )
+      env.DB.prepare(
+        'INSERT INTO outbox (chat_id, msg_key) SELECT value, ?1 FROM json_each(?2)'
+      ).bind(message.key, JSON.stringify(message.chatIds))
     );
   }
+
   for (const [site, id] of Object.entries(updates)) {
     stmts.push(
       env.DB.prepare(
-        "INSERT INTO state (site, last_id) VALUES (?1, ?2) ON CONFLICT(site) DO UPDATE SET last_id = excluded.last_id"
+        'INSERT INTO state (site, last_id) VALUES (?1, ?2) ' +
+        'ON CONFLICT(site) DO UPDATE SET last_id = excluded.last_id'
       ).bind(site, id)
     );
   }
-  if (stmts.length) await env.DB.batch(stmts); // batch واحدة = transaction واحدة
+
+  if (stmts.length) {
+    await env.DB.batch(stmts); // المشاريع والـ outbox وتحديث state في transaction واحدة.
+  }
+
+  console.log(
+    `[db] queuedProjects=${pending.length}; ` +
+    `queuedRecipients=${pending.reduce((total, project) => total + project.chatIds.length, 0)}; ` +
+    `stateUpdates=${Object.keys(updates).length}`
+  );
 }
 
 async function flushOutbox(env) {
   const { results } = await env.DB.prepare(
-    "SELECT o.id, o.chat_id, m.text FROM outbox o JOIN messages m ON m.key = o.msg_key ORDER BY o.id LIMIT ?1"
+    'SELECT o.id, o.chat_id, o.msg_key, m.text ' +
+    'FROM outbox o JOIN messages m ON m.key = o.msg_key ' +
+    'ORDER BY o.id LIMIT ?1'
   )
     .bind(SEND_BATCH)
     .all();
+
+  console.log(`[outbox] rowsToProcess=${results.length}`);
   if (!results.length) return;
 
   const doneIds = [];
+  const deferredIds = [];
   const blocked = new Set();
 
   for (const row of results) {
     try {
       await sendMessage(env, row.chat_id, row.text);
       doneIds.push(row.id);
+      console.log(`[outbox] sent id=${row.id} chat=${row.chat_id} key=${row.msg_key}`);
       await sleep(60);
-    } catch (e) {
-      console.error(`send failed chat ${row.chat_id}:`, String(e));
-      if (e.status === 403 || (e.status === 400 && /chat not found/i.test(String(e)))) {
-        blocked.add(row.chat_id); // اليوزر عمل block للبوت
+    } catch (error) {
+      console.error(
+        `[outbox] send failed id=${row.id} chat=${row.chat_id} ` +
+        `status=${error.status ?? 'unknown'}:`,
+        String(error)
+      );
+
+      if (error.status === 403 || (error.status === 400 && /chat not found/i.test(String(error)))) {
+        blocked.add(row.chat_id);
         doneIds.push(row.id);
-      } else if (e.status === 400) {
-        // غالباً مشكلة في الـ HTML أو اللينك: نعيد المحاولة كنص عادي بدل ما نضيّع المشروع
+        console.warn(`[outbox] chat=${row.chat_id} appears blocked/unavailable; deactivating user`);
+      } else if (error.status === 400) {
+        // لو HTML اتسبب في الرفض، جرّب إرسال النص من غير parse_mode.
         try {
           await sendMessage(env, row.chat_id, toPlain(row.text), { parse_mode: undefined });
-        } catch (e2) {
-          console.error(`plain fallback failed chat ${row.chat_id}:`, String(e2));
+          doneIds.push(row.id);
+          console.log(`[outbox] plain-text fallback sent id=${row.id} chat=${row.chat_id}`);
+        } catch (fallbackError) {
+          // لا نحذف الرسالة الفاشلة: نعيد وضعها في آخر الـ outbox ونكمل بقية الصفوف.
+          console.error(
+            `[outbox] plain-text fallback failed id=${row.id} chat=${row.chat_id}; ` +
+            'message will be deferred for retry:',
+            String(fallbackError)
+          );
+          deferredIds.push(row.id);
         }
-        doneIds.push(row.id);
       } else {
-        break; // 429 أو مشكلة شبكة: نكمل في التشغيلة الجاية
+        // أخطاء الشبكة و429 وأخطاء الخادم: نوقف الدفعة ونترك الصفوف للمحاولة القادمة.
+        console.warn(`[outbox] stopping this batch after transient/API error on id=${row.id}`);
+        break;
       }
     }
   }
 
   const stmts = [];
+
   if (doneIds.length) {
     stmts.push(
-      env.DB.prepare("DELETE FROM outbox WHERE id IN (SELECT value FROM json_each(?1))").bind(JSON.stringify(doneIds))
+      env.DB.prepare(
+        'DELETE FROM outbox WHERE id IN (SELECT value FROM json_each(?1))'
+      ).bind(JSON.stringify(doneIds))
     );
   }
+
+  if (deferredIds.length) {
+    // أنشئ صفوفًا جديدة في نهاية القائمة ثم احذف النسخ القديمة، في معاملة واحدة.
+    // كده رسالة معطوبة لا تمنع إرسال بقية الإشعارات، وتظل محفوظة لإعادة المحاولة.
+    const deferredJson = JSON.stringify(deferredIds);
+    stmts.push(
+      env.DB.prepare(
+        'INSERT INTO outbox (chat_id, msg_key) ' +
+        'SELECT chat_id, msg_key FROM outbox ' +
+        'WHERE id IN (SELECT value FROM json_each(?1)) ORDER BY id'
+      ).bind(deferredJson)
+    );
+    stmts.push(
+      env.DB.prepare(
+        'DELETE FROM outbox WHERE id IN (SELECT value FROM json_each(?1))'
+      ).bind(deferredJson)
+    );
+  }
+
   if (blocked.size) {
     const ids = JSON.stringify([...blocked]);
-    stmts.push(env.DB.prepare("UPDATE users SET active = 0 WHERE chat_id IN (SELECT value FROM json_each(?1))").bind(ids));
-    stmts.push(env.DB.prepare("DELETE FROM outbox WHERE chat_id IN (SELECT value FROM json_each(?1))").bind(ids));
+    stmts.push(
+      env.DB.prepare(
+        'UPDATE users SET active = 0 WHERE chat_id IN (SELECT value FROM json_each(?1))'
+      ).bind(ids)
+    );
+    stmts.push(
+      env.DB.prepare(
+        'DELETE FROM outbox WHERE chat_id IN (SELECT value FROM json_each(?1))'
+      ).bind(ids)
+    );
   }
-  // تنضيف الرسايل اللي مفيش حد مستنيها
+
+  // تنظيف الرسائل التي لم يعد أي مستخدم ينتظرها.
   stmts.push(
     env.DB.prepare(
-      "DELETE FROM messages WHERE created_at < ?1 AND key NOT IN (SELECT msg_key FROM outbox)"
+      'DELETE FROM messages WHERE created_at < ?1 AND key NOT IN (SELECT msg_key FROM outbox)'
     ).bind(Math.floor(Date.now() / 1000) - 600)
   );
-  await env.DB.batch(stmts);
+
+  if (stmts.length) await env.DB.batch(stmts);
+  console.log(
+    `[outbox] completed; sentOrRemoved=${doneIds.length}; ` +
+    `deferred=${deferredIds.length}; blockedChats=${blocked.size}`
+  );
 }
 
 // ---------------------------------------------------------------------
@@ -642,7 +788,11 @@ function toPlain(html) {
 // ---------------------------------------------------------------------
 export default {
   async scheduled(event, env, ctx) {
-    ctx.waitUntil(run(env));
+    ctx.waitUntil(
+      run(env).catch((error) => {
+        console.error('[scheduled] run failed:', String(error), error?.stack || '');
+      })
+    );
   },
 
   async fetch(request, env, ctx) {
