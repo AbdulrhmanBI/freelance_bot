@@ -1,0 +1,20 @@
+name = "freelance-jobs-bot"
+main = "worker.js"
+compatibility_date = "2025-06-01"
+
+# Cron كل دقيقة
+[triggers]
+crons = ["* * * * *"]
+
+# قاعدة البيانات: اعملها بـ  npx wrangler d1 create jobs
+# وحط الـ database_id اللي هيطلعلك هنا
+[[d1_databases]]
+binding = "DB"
+database_name = "jobs"
+database_id = "PUT_YOUR_D1_DATABASE_ID_HERE"
+
+# الـ Secrets بتتضاف بالأوامر دي (مش هنا):
+#   npx wrangler secret put BOT_TOKEN
+#   npx wrangler secret put WEBHOOK_SECRET
+#   npx wrangler secret put ADMIN_KEY
+#   npx wrangler secret put ADMIN_ID      (اختياري)
