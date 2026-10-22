@@ -1,28 +1,20 @@
 // =====================================================================
-//  Freelance Jobs Bot  (Cloudflare Workers + Cron + D1)
-//  أي حد يفتح البوت ويدوس /start بيوصله المشاريع الجديدة.
-//  المواقع: كفيل، مستقل، نفذلي، خمسات، Freelancer (API)
-//
-//  Bindings / Variables (من Settings في الـ Worker):
-//    DB              -> D1 database binding (الاسم لازم يكون DB)
-//    BOT_TOKEN       -> توكن البوت من BotFather           (Secret)
-//    WEBHOOK_SECRET  -> كلمة سر للـ webhook (حروف/أرقام/_/-)  (Secret)
-//    ADMIN_KEY       -> كلمة سر لصفحات /setup و الاختبار   (Secret)
-//    ADMIN_ID        -> اختياري: chat id بتاعك عشان أمر /stats
-//  Trigger: Cron "* * * * *"
+// Freelance Jobs Bot — Cloudflare Workers + Cron + D1
+// Sites: Kafiil, Mostaql, Nafezly, Khamsat, Freelancer
+// Required bindings/secrets:
+//   DB (D1), BOT_TOKEN, WEBHOOK_SECRET, ADMIN_KEY; ADMIN_ID optional
+// Cron: * * * * *
 // =====================================================================
 
-// ---- حدود الخطة المجانية (50 subrequest و 50 D1 query في كل تشغيلة) ----
-// لو عملت ترقية للخطة المدفوعة تقدر ترفع الأرقام دي بأمان.
-const MAX_NEW_PER_RUN = 10; // أقصى عدد مشاريع جديدة بنعالجها في التشغيلة
-const SEND_BATCH = 30; // أقصى عدد رسايل بتتبعت في التشغيلة
-const DEFAULT_SITES = "kafiil,mostaql,nafezly,khamsat"; // Freelancer مقفول افتراضياً (حجمه كبير)
+const MAX_NEW_PER_RUN = 10;
+const SEND_BATCH = 30;
 const MAX_KEYWORDS = 20;
+const DEFAULT_SITES = "kafiil,mostaql,nafezly,khamsat,freelancer";
+const MAX_DESCRIPTION = 1800;
 
 const HEADERS = {
-  "User-Agent":
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36",
-  "Accept": "text/html,application/json;q=0.9,*/*;q=0.8",
+  "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36",
+  Accept: "text/html,application/json;q=0.9,*/*;q=0.8",
   "Accept-Language": "ar,en;q=0.8",
 };
 
@@ -42,59 +34,34 @@ const SCHEMA = [
 ];
 
 // ---------------------------------------------------------------------
-//  تعريف المواقع
+// Site parsers
 // ---------------------------------------------------------------------
-
-// موقع HTML: بنجيب صفحة القايمة ونطلّع روابط المشاريع (ID + URL)،
-// وبعدين لكل مشروع جديد بنفتح صفحته ونطلّع التفاصيل.
-function htmlSite({ key, name, base, listUrl, linkRe, descBetween, budgetBetween }) {
+function htmlSite({ key, name, base, listUrl, linkRe }) {
   return {
     key,
     name,
     async list() {
-      const res = await fetch(listUrl, { headers: HEADERS });
+      const res = await fetch(listUrl, { headers: HEADERS, redirect: "follow" });
       if (!res.ok) throw new Error(`${key} list HTTP ${res.status}`);
       const html = await res.text();
+      if (looksLikeChallenge(html)) throw new Error(`${key} list returned an anti-bot/challenge page`);
+
       const found = new Map();
-      for (const m of html.matchAll(linkRe)) {
-        const id = Number(m[1]);
-        if (!found.has(id)) found.set(id, base + m[0]);
+      for (const match of html.matchAll(linkRe)) {
+        const id = Number(match[1]);
+        if (!Number.isSafeInteger(id) || id <= 0) continue;
+        const path = match[0].split(/[?#]/, 1)[0];
+        const url = new URL(path, base).href;
+        if (!found.has(id)) found.set(id, url);
       }
       return [...found].map(([id, url]) => ({ id, url }));
     },
     async detail(item) {
-      const res = await fetch(item.url, { headers: HEADERS });
+      const res = await fetch(item.url, { headers: HEADERS, redirect: "follow" });
       if (!res.ok) throw new Error(`${key} detail HTTP ${res.status}`);
       const html = await res.text();
-
-      let title =
-        meta(html, "og:title") ||
-        decode((html.match(/<title[^>]*>([\s\S]*?)<\/title>/i) || [])[1] || "");
-      title = title
-        .replace(/\s*[|\-–—]\s*(مستقل|خمسات|نفذلي|كفيل|كاف|Mostaql|Khamsat|Nafezly|Kafiil).*$/i, "")
-        .trim();
-
-      let description = "";
-      let budget = "";
-
-      // بنحوّل جزء صغير بس من الصفحة لنص (عشان نوفر CPU في الخطة المجانية)
-      if (descBetween) {
-        const idx = html.indexOf(descBetween[0]);
-        if (idx >= 0) {
-          const text = htmlToText(html.slice(Math.max(0, idx - 100), idx + 30000));
-          description = textBetween(text, descBetween[0], descBetween[1]);
-          if (title && description.startsWith(title)) description = description.slice(title.length).trim();
-          if (description.length > 6000) description = "";
-          if (budgetBetween) {
-            budget = textBetween(text, budgetBetween[0], budgetBetween[1]).replace(/\s+/g, " ");
-            if (budget.length > 60) budget = "";
-          }
-        }
-      }
-      if (!description) description = meta(html, "og:description") || meta(html, "description");
-      if (!budget) budget = (html.match(/\$\s?[\d,.]+(?:\s*-\s*\$\s?[\d,.]+)?/) || [""])[0];
-
-      return { ...item, title: title || `مشروع جديد #${item.id}`, description, budget, skills: [], extra: [] };
+      if (looksLikeChallenge(html)) throw new Error(`${key} detail returned an anti-bot/challenge page`);
+      return parseHtmlProject(key, html, item);
     },
   };
 }
@@ -104,40 +71,51 @@ const freelancer = {
   name: "Freelancer",
   async list() {
     const base = "https://www.freelancer.com/api/projects/0.1/projects/active/";
-    const tries = [
+    const urls = [
       `${base}?limit=30&full_description=true&job_details=true&sort_field=submitdate&reverse_sort=true`,
       `${base}?limit=30&full_description=true&job_details=true`,
     ];
-    let data = null;
-    for (const url of tries) {
-      const res = await fetch(url, { headers: HEADERS });
-      if (res.ok) {
-        data = await res.json();
-        break;
+    let lastError = "no successful response";
+    for (const url of urls) {
+      try {
+        const res = await fetch(url, { headers: { ...HEADERS, Accept: "application/json" } });
+        if (!res.ok) {
+          lastError = `HTTP ${res.status}`;
+          continue;
+        }
+        const data = await res.json();
+        const projects = data?.result?.projects;
+        if (!Array.isArray(projects)) {
+          lastError = "API response did not contain result.projects";
+          continue;
+        }
+        return projects.map((p) => {
+          const currency = p.currency || {};
+          const budgetObj = p.budget || {};
+          let budget = "";
+          if (budgetObj.minimum != null || budgetObj.maximum != null) {
+            const low = budgetObj.minimum ?? "?";
+            const high = budgetObj.maximum ?? "?";
+            budget = `${currency.sign || ""}${low} - ${currency.sign || ""}${high}${currency.code ? ` ${currency.code}` : ""}`.trim();
+            if (p.type === "hourly") budget += " (بالساعة)";
+          }
+          const extra = [];
+          if (p.bid_stats?.bid_count != null) extra.push(`عدد العروض: ${p.bid_stats.bid_count}`);
+          return {
+            id: Number(p.id),
+            url: `https://www.freelancer.com/projects/${p.seo_url || p.id}`,
+            title: cleanText(p.title || `مشروع جديد #${p.id}`),
+            description: cleanText(p.description || p.preview_description || ""),
+            budget,
+            skills: (p.jobs || []).map((job) => cleanText(job.name || "")).filter(Boolean).slice(0, 8),
+            extra,
+          };
+        }).filter((p) => Number.isSafeInteger(p.id) && p.id > 0);
+      } catch (error) {
+        lastError = String(error);
       }
     }
-    if (!data) throw new Error("freelancer API failed");
-
-    return (data.result?.projects || []).map((p) => {
-      const cur = p.currency || {};
-      const b = p.budget || {};
-      let budget = "";
-      if (b.minimum != null || b.maximum != null) {
-        budget = `${cur.sign || ""}${b.minimum ?? "?"} - ${cur.sign || ""}${b.maximum ?? "?"} ${cur.code || ""}`.trim();
-        if (p.type === "hourly") budget += " (بالساعة)";
-      }
-      const extra = [];
-      if (p.bid_stats?.bid_count != null) extra.push(`عدد العروض: ${p.bid_stats.bid_count}`);
-      return {
-        id: p.id,
-        url: `https://www.freelancer.com/projects/${p.seo_url || p.id}`,
-        title: p.title || `Project #${p.id}`,
-        description: p.description || p.preview_description || "",
-        budget,
-        skills: (p.jobs || []).map((j) => j.name).filter(Boolean).slice(0, 8),
-        extra,
-      };
-    });
+    throw new Error(`Freelancer API failed: ${lastError}`);
   },
 };
 
@@ -147,115 +125,215 @@ const SITES = [
     name: "كفيل",
     base: "https://kafiil.com",
     listUrl: "https://kafiil.com/projects",
-    linkRe: /\/project\/(\d+)-[^"'\s<>)]*/g,
+    linkRe: /\/project\/(\d+)(?:-[^"'\s<>?#]*)?/g,
   }),
   htmlSite({
     key: "mostaql",
     name: "مستقل",
     base: "https://mostaql.com",
     listUrl: "https://mostaql.com/projects",
-    linkRe: /\/project\/(\d+)(?:-[^"'\s<>)]*)?/g,
-    descBetween: ["تفاصيل المشروع", "حالة المشروع"],
-    budgetBetween: ["الميزانية", "مدة التنفيذ"],
+    linkRe: /\/project\/(\d+)(?:-[^"'\s<>?#]*)?/g,
   }),
   htmlSite({
     key: "nafezly",
     name: "نفذلي",
     base: "https://nafezly.com",
     listUrl: "https://nafezly.com/projects",
-    linkRe: /\/project\/(\d+)(?:-[^"'\s<>)]*)?/g,
+    linkRe: /\/project\/(\d+)(?:-[^"'\s<>?#]*)?/g,
   }),
   htmlSite({
     key: "khamsat",
     name: "خمسات",
     base: "https://khamsat.com",
     listUrl: "https://khamsat.com/community/requests",
-    linkRe: /\/community\/requests\/(\d+)(?:-[^"'\s<>)]*)?/g,
+    linkRe: /\/community\/requests\/(\d+)(?:-[^"'\s<>?#]*)?/g,
   }),
   freelancer,
 ];
-const SITE_KEYS = SITES.map((s) => s.key);
+const SITE_KEYS = SITES.map((site) => site.key);
+
+function looksLikeChallenge(html) {
+  return /cf-chl-|challenge-platform|verify you are human|checking your browser|just a moment\.\.\./i.test(String(html).slice(0, 25000));
+}
+
+function parseHtmlProject(siteKey, html, item) {
+  const plain = htmlToText(html);
+  const jsonLd = extractJsonLd(html);
+  const h1 = firstTagText(html, "h1");
+  const pageTitle = firstTagText(html, "title");
+  const metaTitle = meta(html, "og:title") || meta(html, "twitter:title");
+  let title = cleanTitle(metaTitle || h1 || jsonLd.title || pageTitle || "", siteKey);
+  const slugTitle = titleFromUrl(item.url);
+  if (!title || /^مشروع جديد\s*#?\d+$/i.test(title) || isGenericTitle(title, siteKey)) {
+    title = slugTitle || `مشروع جديد #${item.id}`;
+  }
+
+  // Some sites expose the full project description only in the visible HTML,
+  // not in Open Graph metadata. Prefer label-bounded text, then metadata/JSON-LD,
+  // then likely content containers/paragraphs.
+  let description = "";
+  if (siteKey === "mostaql") {
+    description = textAfterAnyLabel(plain, ["تفاصيل المشروع", "وصف المشروع"], ["حالة المشروع", "الميزانية", "مدة التنفيذ"]);
+  } else if (siteKey === "nafezly") {
+    description = textAfterAnyLabel(plain, ["تفاصيل المشروع", "وصف المشروع", "قم بوصف المشروع"], ["الميزانية", "المدة المتوقعة", "عدد العروض", "حالة المشروع"]);
+  } else if (siteKey === "khamsat") {
+    description = textAfterAnyLabel(plain, ["تفاصيل الطلب", "تفاصيل المشروع", "وصف الطلب"], ["آخر تفاعل", "تاريخ النشر", "صاحب الطلب", "الميزانية"]);
+  }
+  if (!isUsefulDescription(description, title)) description = "";
+  if (!description) description = meta(html, "og:description") || meta(html, "description") || meta(html, "twitter:description") || cleanText(jsonLd.description || "");
+  if (!isUsefulDescription(description, title)) description = "";
+  if (!description) description = extractLikelyDescription(html, title);
+  description = normalizeDescription(description, title);
+
+  let budget = extractBudget(plain);
+  if (!budget) budget = extractBudget(`${meta(html, "og:description")} ${meta(html, "description")} ${jsonLd.description || ""}`);
+
+  const skills = extractSkills(plain);
+  const extra = [];
+  const bids = plain.match(/(?:عدد العروض|العروض|bids)\s*:?\s*(\d+)/i);
+  if (bids) extra.push(`عدد العروض: ${bids[1]}`);
+
+  return { ...item, title: title || `مشروع جديد #${item.id}`, description, budget, skills, extra };
+}
+
+function extractJsonLd(html) {
+  const scripts = String(html).matchAll(/<script\b[^>]*type=["']application\/ld\+json["'][^>]*>([\s\S]*?)<\/script>/gi);
+  for (const match of scripts) {
+    try {
+      const data = JSON.parse(decode(match[1].trim()));
+      const queue = Array.isArray(data) ? [...data] : [data];
+      while (queue.length) {
+        const node = queue.shift();
+        if (!node || typeof node !== "object") continue;
+        if (Array.isArray(node)) { queue.push(...node); continue; }
+        if (node.description && typeof node.description === "string") {
+          return { description: cleanText(node.description), title: cleanText(node.headline || node.name || "") };
+        }
+        if (node["@graph"]) queue.push(node["@graph"]);
+      }
+    } catch (_) {
+      // Ignore invalid JSON-LD and use normal HTML extraction.
+    }
+  }
+  return {};
+}
+
+function extractLikelyDescription(html, title) {
+  const containerRe = /<(div|section|article|blockquote)[^>]*(?:class|id)=["'][^"']*(description|details|project-content|request-content|post-content|post-body|content-body|project-body|request-body|brief)[^"']*["'][^>]*>/gi;
+  const candidates = [];
+  for (const match of String(html).matchAll(containerRe)) {
+    const tag = match[1].toLowerCase();
+    const inner = matchingElementInnerHTML(html, tag, match.index);
+    if (!inner) continue;
+    const text = htmlToText(inner);
+    if (isUsefulDescription(text, title)) candidates.push(text);
+    if (candidates.length >= 4) break;
+  }
+  candidates.sort((a, b) => Math.min(b.length, 2400) - Math.min(a.length, 2400));
+  if (candidates.length) return candidates[0];
+
+  const paragraphTexts = [];
+  for (const match of String(html).matchAll(/<(p|blockquote)\b[^>]*>([\s\S]*?)<\/\1>/gi)) {
+    const text = htmlToText(match[2]);
+    if (isUsefulDescription(text, title) && text.length >= 45) paragraphTexts.push(text);
+    if (paragraphTexts.join("\n").length > 3500) break;
+  }
+  if (paragraphTexts.length) return paragraphTexts.slice(0, 5).join("\n");
+
+  // Last resort: accept only a modest main/article section, not the whole navigation-heavy page.
+  const mainMatch = String(html).match(/<(article|main)\b[^>]*>([\s\S]{0,20000}?)<\/\1>/i);
+  if (mainMatch) {
+    const text = htmlToText(mainMatch[2]);
+    if (isUsefulDescription(text, title)) return text;
+  }
+  return "";
+}
+
+function matchingElementInnerHTML(html, tag, openIndex) {
+  const openEnd = html.indexOf(">", openIndex);
+  if (openEnd < 0) return "";
+  const tokenRe = new RegExp(`<\\/?${tag}\\b[^>]*>`, "gi");
+  tokenRe.lastIndex = openEnd + 1;
+  let depth = 1;
+  let match;
+  let scanned = 0;
+  while ((match = tokenRe.exec(html)) && scanned < 25000) {
+    scanned = match.index - openEnd;
+    if (/^<\//.test(match[0])) depth--;
+    else if (!/\/\s*>$/.test(match[0])) depth++;
+    if (depth === 0) return html.slice(openEnd + 1, match.index);
+  }
+  return "";
+}
+
+function extractSkills(plain) {
+  const result = [];
+  const match = String(plain).match(/(?:المهارات المطلوبة|المهارات|skills)\s*:?\s*([\s\S]{0,300})/i);
+  if (!match) return result;
+  const section = match[1].split(/(?:الميزانية|مدة التنفيذ|حالة المشروع|عدد العروض|الوصف|تفاصيل المشروع)/i)[0];
+  return section.split(/[،,|\n•·]/).map((s) => cleanText(s)).filter((s) => s.length > 1 && s.length < 50).slice(0, 8);
+}
 
 // ---------------------------------------------------------------------
-//  Cron: نجيب المشاريع الجديدة -> نحطها في الـ outbox -> نبعت دفعة
+// Cron: fetch new projects -> enqueue once -> send outbox batch
 // ---------------------------------------------------------------------
 async function run(env) {
   const startedAt = Date.now();
-  const [state, users] = await withSchema(env, () =>
-    Promise.all([loadState(env), loadUsers(env)])
-  );
-
-  const updates = {};
-  const pending = []; // { key, text, chatIds }
+  const [state, users] = await withSchema(env, () => Promise.all([loadState(env), loadUsers(env)]));
+  const stateUpdates = {};
+  const pending = [];
   let processed = 0;
 
-  console.log(`[run] started; activeUsers=${users.length}`);
-  if (!users.length) {
-    console.warn('[run] no active users found; no project notifications can be queued');
-  }
+  console.log(`[run] started; activeUsers=${users.length}; sites=${SITES.length}`);
+  if (!users.length) console.warn("[run] no active users; discovered projects will be baselined without notifications");
 
-  const lists = await Promise.allSettled(SITES.map((site) => site.list()));
-
+  const listResults = await Promise.allSettled(SITES.map((site) => site.list()));
   for (let i = 0; i < SITES.length; i++) {
     const site = SITES[i];
-    const result = lists[i];
+    const result = listResults[i];
+    if (result.status === "rejected") {
+      console.error(`[${site.key}] list failed: ${String(result.reason)}`);
+      continue; // Never advance state on a failed fetch.
+    }
 
-    if (result.status === 'rejected') {
-      console.error(`[${site.key}] list failed:`, String(result.reason));
+    const items = result.value.filter((item) => Number.isSafeInteger(Number(item.id)) && Number(item.id) > 0);
+    const newestId = items.length ? Math.max(...items.map((item) => Number(item.id))) : null;
+    console.log(`[${site.key}] found=${items.length}; storedLastId=${state[site.key] ?? "missing"}; newestId=${newestId ?? "none"}`);
+    if (!items.length) {
+      console.warn(`[${site.key}] no project links parsed; state was not changed`);
       continue;
     }
 
-    const items = result.value;
-    const newestId = items.length
-      ? Math.max(...items.map((item) => Number(item.id) || 0))
-      : null;
-    console.log(
-      `[${site.key}] list found=${items.length}; ` +
-      `storedLastId=${state[site.key] ?? 'none'}; newestId=${newestId ?? 'none'}`
-    );
-
-    if (!items.length) continue;
-
-    // أول تشغيل للموقع: نسجل أعلى ID من غير إرسال المشاريع القديمة.
+    // Repair a missing state row immediately after a successful list fetch.
+    // This first successful scan is a baseline: do not flood users with old projects.
     if (state[site.key] == null) {
-      updates[site.key] = newestId;
-      console.warn(
-        `[${site.key}] first run: initialized last_id=${newestId}; ` +
-        'existing projects were intentionally not sent'
-      );
+      await env.DB.prepare("INSERT OR IGNORE INTO state (site, last_id) VALUES (?1, ?2)")
+        .bind(site.key, newestId).run();
+      const stored = await env.DB.prepare("SELECT last_id FROM state WHERE site = ?1").bind(site.key).first();
+      state[site.key] = Number(stored?.last_id ?? newestId);
+      console.warn(`[${site.key}] initialized missing state row at last_id=${state[site.key]}; existing projects were not sent`);
       continue;
     }
 
+    const lastId = Number(state[site.key]);
     const fresh = items
-      .filter((item) => Number(item.id) > Number(state[site.key]))
+      .filter((item) => Number(item.id) > lastId)
       .sort((a, b) => Number(a.id) - Number(b.id));
-
     console.log(`[${site.key}] freshProjects=${fresh.length}`);
     if (!fresh.length) continue;
 
-    // استخدم تطابقًا كاملًا لاسم الموقع بدل substring.
-    const audience = users.filter((user) =>
-      String(user.sites || '').split(',').map((siteKey) => siteKey.trim()).includes(site.key)
-    );
-
+    const audience = users.filter((user) => parseSites(user.sites).includes(site.key));
     if (!audience.length) {
-      const highestFreshId = Math.max(...fresh.map((item) => Number(item.id)));
-      updates[site.key] = highestFreshId;
-      console.warn(
-        `[${site.key}] no active subscribers selected this site; ` +
-        `skipping ${fresh.length} fresh projects and advancing last_id=${highestFreshId}`
-      );
+      // Do not accumulate old jobs while nobody is subscribed to this site.
+      stateUpdates[site.key] = newestId;
+      console.warn(`[${site.key}] no active subscribers selected this site; skipping ${fresh.length} new jobs and advancing to ${newestId}`);
       continue;
     }
 
-    let last = Number(state[site.key]);
-
+    let lastProcessedId = lastId;
     for (const item of fresh) {
       if (processed >= MAX_NEW_PER_RUN) {
-        console.warn(
-          `[run] MAX_NEW_PER_RUN=${MAX_NEW_PER_RUN} reached; ` +
-          `remaining projects on ${site.key} will be checked on the next run`
-        );
+        console.warn(`[run] MAX_NEW_PER_RUN=${MAX_NEW_PER_RUN} reached; remaining projects will be handled in later runs`);
         break;
       }
 
@@ -263,113 +341,74 @@ async function run(env) {
       try {
         full = site.detail ? await site.detail(item) : item;
       } catch (error) {
-        console.error(`[${site.key}] detail failed #${item.id}:`, String(error));
-        full = {
-          ...item,
-          title: `مشروع جديد #${item.id}`,
-          description: '',
-          budget: '',
-          skills: [],
-          extra: [],
-        };
+        console.error(`[${site.key}] detail failed id=${item.id}: ${String(error)}`);
+        full = { ...item, title: titleFromUrl(item.url) || `مشروع جديد #${item.id}`, description: "", budget: "", skills: [], extra: [] };
       }
 
-      const hay = `${full.title || ''} ${full.description || ''} ${(full.skills || []).join(' ')}`.toLowerCase();
-      const chatIds = audience
-        .filter((user) => matchesKeywords(user.keywords, hay))
-        .map((user) => user.chat_id);
+      const haystack = `${full.title || ""} ${full.description || ""} ${(full.skills || []).join(" ")}`.toLocaleLowerCase();
+      const recipients = audience
+        .filter((user) => matchesKeywords(user.keywords, haystack))
+        .map((user) => Number(user.chat_id));
 
       processed++;
-      last = Number(item.id);
-
-      if (chatIds.length) {
-        pending.push({
-          key: `${site.key}:${item.id}`,
-          text: formatMessage(site, full),
-          chatIds,
-        });
-        console.log(
-          `[${site.key}] project=${item.id} queuedForRecipients=${chatIds.length}`
-        );
+      lastProcessedId = Number(item.id);
+      if (recipients.length) {
+        pending.push({ key: `${site.key}:${item.id}`, text: formatMessage(site, full), chatIds: recipients });
+        console.log(`[${site.key}] project=${item.id}; recipients=${recipients.length}; queued=true`);
       } else {
-        console.log(
-          `[${site.key}] project=${item.id} skipped; no recipients matched keywords ` +
-          `(subscribers=${audience.length})`
-        );
+        console.log(`[${site.key}] project=${item.id}; recipients=0; skipped_by_keyword_filter=true`);
       }
     }
-
-    if (last !== Number(state[site.key])) {
-      updates[site.key] = last;
-    }
+    if (lastProcessedId > lastId) stateUpdates[site.key] = lastProcessedId;
   }
 
-  const recipientCount = pending.reduce((total, project) => total + project.chatIds.length, 0);
-  console.log(
-    `[run] discovery complete; processed=${processed}; ` +
-    `pendingProjects=${pending.length}; pendingRecipients=${recipientCount}; ` +
-    `stateUpdates=${Object.keys(updates).length}`
-  );
-
-  await enqueueAndSave(env, pending, updates);
+  const recipientCount = pending.reduce((sum, project) => sum + project.chatIds.length, 0);
+  console.log(`[run] discovery complete; processed=${processed}; pendingProjects=${pending.length}; pendingRecipients=${recipientCount}; stateUpdates=${Object.keys(stateUpdates).length}`);
+  await enqueueAndSave(env, pending, stateUpdates);
   await flushOutbox(env);
-
-  console.log(`[run] completed in ${Date.now() - startedAt}ms`);
+  console.log(`[run] complete in ${Date.now() - startedAt}ms`);
 }
 
-async function enqueueAndSave(env, pending, updates) {
+async function enqueueAndSave(env, pending, stateUpdates) {
   const now = Math.floor(Date.now() / 1000);
-  const stmts = [];
-
+  const statements = [];
   for (const message of pending) {
-    stmts.push(
-      env.DB.prepare(
-        'INSERT OR IGNORE INTO messages (key, text, created_at) VALUES (?1, ?2, ?3)'
-      ).bind(message.key, message.text, now)
+    statements.push(
+      env.DB.prepare("INSERT OR IGNORE INTO messages (key, text, created_at) VALUES (?1, ?2, ?3)")
+        .bind(message.key, message.text, now)
     );
-    stmts.push(
+    // Avoid duplicate outbox rows if scheduled invocations overlap or a key is reprocessed.
+    statements.push(
       env.DB.prepare(
-        'INSERT INTO outbox (chat_id, msg_key) SELECT value, ?1 FROM json_each(?2)'
+        "INSERT INTO outbox (chat_id, msg_key) " +
+        "SELECT value, ?1 FROM json_each(?2) " +
+        "WHERE NOT EXISTS (SELECT 1 FROM outbox o WHERE o.chat_id = value AND o.msg_key = ?1)"
       ).bind(message.key, JSON.stringify(message.chatIds))
     );
   }
-
-  for (const [site, id] of Object.entries(updates)) {
-    stmts.push(
+  for (const [site, id] of Object.entries(stateUpdates)) {
+    statements.push(
       env.DB.prepare(
-        'INSERT INTO state (site, last_id) VALUES (?1, ?2) ' +
-        'ON CONFLICT(site) DO UPDATE SET last_id = excluded.last_id'
+        "INSERT INTO state (site, last_id) VALUES (?1, ?2) " +
+        "ON CONFLICT(site) DO UPDATE SET last_id = MAX(state.last_id, excluded.last_id)"
       ).bind(site, id)
     );
   }
-
-  if (stmts.length) {
-    await env.DB.batch(stmts); // المشاريع والـ outbox وتحديث state في transaction واحدة.
-  }
-
-  console.log(
-    `[db] queuedProjects=${pending.length}; ` +
-    `queuedRecipients=${pending.reduce((total, project) => total + project.chatIds.length, 0)}; ` +
-    `stateUpdates=${Object.keys(updates).length}`
-  );
+  if (statements.length) await env.DB.batch(statements);
+  console.log(`[db] queuedProjects=${pending.length}; queuedRecipients=${pending.reduce((sum, project) => sum + project.chatIds.length, 0)}; stateUpdates=${Object.keys(stateUpdates).length}`);
 }
 
 async function flushOutbox(env) {
-  const { results } = await env.DB.prepare(
-    'SELECT o.id, o.chat_id, o.msg_key, m.text ' +
-    'FROM outbox o JOIN messages m ON m.key = o.msg_key ' +
-    'ORDER BY o.id LIMIT ?1'
-  )
-    .bind(SEND_BATCH)
-    .all();
-
+  const { results = [] } = await env.DB.prepare(
+    "SELECT o.id, o.chat_id, o.msg_key, m.text " +
+    "FROM outbox o JOIN messages m ON m.key = o.msg_key ORDER BY o.id LIMIT ?1"
+  ).bind(SEND_BATCH).all();
   console.log(`[outbox] rowsToProcess=${results.length}`);
   if (!results.length) return;
 
   const doneIds = [];
   const deferredIds = [];
-  const blocked = new Set();
-
+  const blockedChats = new Set();
   for (const row of results) {
     try {
       await sendMessage(env, row.chat_id, row.text);
@@ -377,240 +416,181 @@ async function flushOutbox(env) {
       console.log(`[outbox] sent id=${row.id} chat=${row.chat_id} key=${row.msg_key}`);
       await sleep(60);
     } catch (error) {
-      console.error(
-        `[outbox] send failed id=${row.id} chat=${row.chat_id} ` +
-        `status=${error.status ?? 'unknown'}:`,
-        String(error)
-      );
-
-      if (error.status === 403 || (error.status === 400 && /chat not found/i.test(String(error)))) {
-        blocked.add(row.chat_id);
+      console.error(`[outbox] send failed id=${row.id} chat=${row.chat_id} status=${error.status ?? "unknown"}: ${String(error)}`);
+      if (isBlockedChatError(error)) {
+        blockedChats.add(Number(row.chat_id));
         doneIds.push(row.id);
-        console.warn(`[outbox] chat=${row.chat_id} appears blocked/unavailable; deactivating user`);
-      } else if (error.status === 400) {
-        // لو HTML اتسبب في الرفض، جرّب إرسال النص من غير parse_mode.
+        continue;
+      }
+      if (error.status === 400) {
         try {
           await sendMessage(env, row.chat_id, toPlain(row.text), { parse_mode: undefined });
           doneIds.push(row.id);
           console.log(`[outbox] plain-text fallback sent id=${row.id} chat=${row.chat_id}`);
         } catch (fallbackError) {
-          // لا نحذف الرسالة الفاشلة: نعيد وضعها في آخر الـ outbox ونكمل بقية الصفوف.
-          console.error(
-            `[outbox] plain-text fallback failed id=${row.id} chat=${row.chat_id}; ` +
-            'message will be deferred for retry:',
-            String(fallbackError)
-          );
-          deferredIds.push(row.id);
+          console.error(`[outbox] plain-text fallback failed id=${row.id} chat=${row.chat_id}: ${String(fallbackError)}`);
+          if (isBlockedChatError(fallbackError)) {
+            blockedChats.add(Number(row.chat_id));
+            doneIds.push(row.id);
+          } else {
+            deferredIds.push(row.id);
+          }
         }
-      } else {
-        // أخطاء الشبكة و429 وأخطاء الخادم: نوقف الدفعة ونترك الصفوف للمحاولة القادمة.
-        console.warn(`[outbox] stopping this batch after transient/API error on id=${row.id}`);
-        break;
+        continue;
       }
+      // Network failures, rate limits, and server errors stay in the queue.
+      break;
     }
   }
 
-  const stmts = [];
-
+  const statements = [];
   if (doneIds.length) {
-    stmts.push(
-      env.DB.prepare(
-        'DELETE FROM outbox WHERE id IN (SELECT value FROM json_each(?1))'
-      ).bind(JSON.stringify(doneIds))
-    );
+    statements.push(env.DB.prepare("DELETE FROM outbox WHERE id IN (SELECT value FROM json_each(?1))").bind(JSON.stringify(doneIds)));
   }
-
   if (deferredIds.length) {
-    // أنشئ صفوفًا جديدة في نهاية القائمة ثم احذف النسخ القديمة، في معاملة واحدة.
-    // كده رسالة معطوبة لا تمنع إرسال بقية الإشعارات، وتظل محفوظة لإعادة المحاولة.
-    const deferredJson = JSON.stringify(deferredIds);
-    stmts.push(
+    const idsJson = JSON.stringify(deferredIds);
+    statements.push(
       env.DB.prepare(
-        'INSERT INTO outbox (chat_id, msg_key) ' +
-        'SELECT chat_id, msg_key FROM outbox ' +
-        'WHERE id IN (SELECT value FROM json_each(?1)) ORDER BY id'
-      ).bind(deferredJson)
+        "INSERT INTO outbox (chat_id, msg_key) " +
+        "SELECT chat_id, msg_key FROM outbox WHERE id IN (SELECT value FROM json_each(?1)) ORDER BY id"
+      ).bind(idsJson)
     );
-    stmts.push(
-      env.DB.prepare(
-        'DELETE FROM outbox WHERE id IN (SELECT value FROM json_each(?1))'
-      ).bind(deferredJson)
-    );
+    statements.push(env.DB.prepare("DELETE FROM outbox WHERE id IN (SELECT value FROM json_each(?1))").bind(idsJson));
   }
-
-  if (blocked.size) {
-    const ids = JSON.stringify([...blocked]);
-    stmts.push(
-      env.DB.prepare(
-        'UPDATE users SET active = 0 WHERE chat_id IN (SELECT value FROM json_each(?1))'
-      ).bind(ids)
-    );
-    stmts.push(
-      env.DB.prepare(
-        'DELETE FROM outbox WHERE chat_id IN (SELECT value FROM json_each(?1))'
-      ).bind(ids)
-    );
+  if (blockedChats.size) {
+    const idsJson = JSON.stringify([...blockedChats]);
+    statements.push(env.DB.prepare("UPDATE users SET active = 0 WHERE chat_id IN (SELECT value FROM json_each(?1))").bind(idsJson));
+    statements.push(env.DB.prepare("DELETE FROM outbox WHERE chat_id IN (SELECT value FROM json_each(?1))").bind(idsJson));
   }
-
-  // تنظيف الرسائل التي لم يعد أي مستخدم ينتظرها.
-  stmts.push(
-    env.DB.prepare(
-      'DELETE FROM messages WHERE created_at < ?1 AND key NOT IN (SELECT msg_key FROM outbox)'
-    ).bind(Math.floor(Date.now() / 1000) - 600)
+  statements.push(
+    env.DB.prepare("DELETE FROM messages WHERE created_at < ?1 AND key NOT IN (SELECT msg_key FROM outbox)")
+      .bind(Math.floor(Date.now() / 1000) - 600)
   );
-
-  if (stmts.length) await env.DB.batch(stmts);
-  console.log(
-    `[outbox] completed; sentOrRemoved=${doneIds.length}; ` +
-    `deferred=${deferredIds.length}; blockedChats=${blocked.size}`
-  );
+  if (statements.length) await env.DB.batch(statements);
+  console.log(`[outbox] complete; removed=${doneIds.length}; deferred=${deferredIds.length}; blockedChats=${blockedChats.size}`);
 }
 
 // ---------------------------------------------------------------------
-//  Telegram webhook (أوامر اليوزرز)
+// Telegram commands/webhook
 // ---------------------------------------------------------------------
 const HELP = [
-  "أهلاً 👋 البوت ده بيبعتلك المشاريع الجديدة من مواقع العمل الحر أول ما تنزل.",
+  "أهلاً 👋 البوت ده بيبعتلك المشاريع الجديدة من مواقع العمل الحر.",
   "",
   "المواقع: كفيل، مستقل، نفذلي، خمسات، وFreelancer.",
   "",
   "الأوامر:",
-  "/sites - اختار المواقع اللي تحب تتابعها",
-  "/keywords - فلتر بكلمات (مثال: /keywords python, بوت, تصميم)",
+  "/sites - اختيار المواقع",
+  "/sites all - تفعيل كل المواقع مرة واحدة",
+  "/keywords python, بوت, تصميم - فلترة بالكلمات",
+  "/keywords clear - مسح فلتر الكلمات",
   "/status - إعداداتك الحالية",
   "/stop - إيقاف الإشعارات",
-  "/start - تشغيل الإشعارات تاني",
+  "/start - تشغيل الإشعارات",
   "",
   "من غير كلمات مفتاحية هتوصلك كل المشاريع من المواقع المفعّلة.",
 ].join("\n");
 
-async function handleUpdate(env, upd) {
-  if (upd.callback_query) return handleCallback(env, upd.callback_query);
-
-  const msg = upd.message;
+async function handleUpdate(env, update) {
+  if (update.callback_query) return handleCallback(env, update.callback_query);
+  const msg = update.message;
   if (!msg || !msg.text || msg.chat?.type !== "private") return;
+
   const chatId = msg.chat.id;
   const text = msg.text.trim();
   const first = text.split(/\s+/)[0] || "";
-  const cmd = first.toLowerCase().replace(/@.*$/, "");
+  const command = first.toLowerCase().replace(/@.*$/, "");
   const args = text.slice(first.length).trim();
 
-  switch (cmd) {
+  switch (command) {
     case "/start": {
-      await withSchema(env, () =>
-        env.DB.prepare(
-          "INSERT INTO users (chat_id, active, sites, keywords, created_at) VALUES (?1, 1, ?2, '', ?3) " +
-            "ON CONFLICT(chat_id) DO UPDATE SET active = 1"
-        )
-          .bind(chatId, DEFAULT_SITES, Math.floor(Date.now() / 1000))
-          .run()
-      );
-      return sendMessage(env, chatId, HELP + "\n\n✅ تم تفعيل الإشعارات. (Freelancer مقفول افتراضياً، فعّله من /sites)");
+      await withSchema(env, () => env.DB.prepare(
+        "INSERT INTO users (chat_id, active, sites, keywords, created_at) VALUES (?1, 1, ?2, '', ?3) " +
+        "ON CONFLICT(chat_id) DO UPDATE SET active = 1"
+      ).bind(chatId, DEFAULT_SITES, Math.floor(Date.now() / 1000)).run());
+      return sendMessage(env, chatId, `${HELP}\n\n✅ تم تفعيل الإشعارات. لو عايز كل المواقع بما فيها Freelancer ابعت /sites all`);
     }
-
     case "/stop": {
       await withSchema(env, () => env.DB.prepare("UPDATE users SET active = 0 WHERE chat_id = ?1").bind(chatId).run());
       return sendMessage(env, chatId, "⏸ تم إيقاف الإشعارات. ابعت /start وقت ما تحب ترجع.");
     }
-
     case "/sites": {
       const user = await getOrCreateUser(env, chatId);
-      return sendMessage(env, chatId, "اختار المواقع (دوس على الموقع لتفعيله/إلغائه):", {
-        reply_markup: sitesKeyboard(user.sites.split(",")),
+      if (/^(all|كلها|الكل)$/i.test(args)) {
+        await env.DB.prepare("UPDATE users SET sites = ?1, active = 1 WHERE chat_id = ?2")
+          .bind(DEFAULT_SITES, chatId).run();
+        return sendMessage(env, chatId, "✅ تم تفعيل كل المواقع الخمسة، ومنها نفذلي وFreelancer.", {
+          reply_markup: sitesKeyboard(SITE_KEYS),
+        });
+      }
+      return sendMessage(env, chatId, "اختار المواقع اللي عايز تتابعها، أو ابعت /sites all لتفعيلها كلها:", {
+        reply_markup: sitesKeyboard(parseSites(user.sites)),
       });
     }
-
     case "/keywords": {
       const user = await getOrCreateUser(env, chatId);
       if (!args) {
-        const cur = user.keywords ? esc(user.keywords.split(",").join("، ")) : "مفيش (بتوصلك كل المشاريع)";
-        return sendMessage(
-          env,
-          chatId,
-          `🔎 كلماتك الحالية: ${cur}\n\nلتغييرها: /keywords python, بوت, تصميم\nلمسحها: /keywords clear`
-        );
+        const current = user.keywords ? esc(user.keywords.split(",").join("، ")) : "مفيش (بتوصلك كل المشاريع)";
+        return sendMessage(env, chatId, `🔎 كلماتك الحالية: ${current}\n\nلتغييرها: /keywords python, بوت, تصميم\nلمسحها: /keywords clear`);
       }
       if (/^(clear|مسح)$/i.test(args)) {
         await env.DB.prepare("UPDATE users SET keywords = '' WHERE chat_id = ?1").bind(chatId).run();
         return sendMessage(env, chatId, "🧹 اتمسحت الكلمات. هتوصلك كل المشاريع.");
       }
-      const list = [
-        ...new Set(
-          args
-            .split(/[,،\n]/)
-            .map((s) => s.trim().toLowerCase().slice(0, 30))
-            .filter(Boolean)
-        ),
-      ].slice(0, MAX_KEYWORDS);
+      const list = [...new Set(args.split(/[,،\n]/).map((value) => value.trim().toLocaleLowerCase().slice(0, 30)).filter(Boolean))].slice(0, MAX_KEYWORDS);
       await env.DB.prepare("UPDATE users SET keywords = ?1 WHERE chat_id = ?2").bind(list.join(","), chatId).run();
-      return sendMessage(
-        env,
-        chatId,
-        `✅ هتوصلك المشاريع اللي فيها واحدة من: ${esc(list.join("، "))}\n(الفلتر بيدور في العنوان والوصف، فاكتب الكلمة بالعربي والإنجليزي لو عايز)`
-      );
+      return sendMessage(env, chatId, `✅ هتوصلك المشاريع اللي فيها واحدة من: ${esc(list.join("، "))}\n(الفلتر بيدور في العنوان والوصف والمهارات)`);
     }
-
     case "/status": {
       const user = await getOrCreateUser(env, chatId);
-      const names = user.sites
-        .split(",")
-        .map((k) => SITES.find((s) => s.key === k)?.name)
-        .filter(Boolean);
-      return sendMessage(
-        env,
-        chatId,
-        [
-          `الحالة: ${user.active ? "✅ شغال" : "⏸ متوقف"}`,
-          `المواقع: ${names.length ? names.join("، ") : "مفيش"}`,
-          `الكلمات: ${user.keywords ? esc(user.keywords.split(",").join("، ")) : "مفيش (كل المشاريع)"}`,
-        ].join("\n")
-      );
+      const selected = parseSites(user.sites);
+      const names = selected.map((key) => SITES.find((site) => site.key === key)?.name).filter(Boolean);
+      return sendMessage(env, chatId, [
+        `الحالة: ${user.active ? "✅ شغال" : "⏸ متوقف"}`,
+        `المواقع: ${names.length ? names.join("، ") : "مفيش"}`,
+        `الكلمات: ${user.keywords ? esc(user.keywords.split(",").join("، ")) : "مفيش (كل المشاريع)"}`,
+      ].join("\n"));
     }
-
     case "/stats": {
       if (!env.ADMIN_ID || String(chatId) !== String(env.ADMIN_ID)) return;
-      const row = await env.DB.prepare(
-        "SELECT COUNT(*) AS total, COALESCE(SUM(active), 0) AS active FROM users"
-      ).first();
+      const row = await env.DB.prepare("SELECT COUNT(*) AS total, COALESCE(SUM(active), 0) AS active FROM users").first();
       return sendMessage(env, chatId, `👥 المستخدمين: ${row.total} (نشطين: ${row.active})`);
     }
-
     case "/help":
     default:
       return sendMessage(env, chatId, HELP);
   }
 }
 
-async function handleCallback(env, cq) {
-  const chatId = cq.message?.chat?.id;
+async function handleCallback(env, callback) {
+  const chatId = callback.message?.chat?.id;
   try {
-    if (chatId && (cq.data || "").startsWith("t:")) {
-      const key = cq.data.slice(2);
+    if (chatId && String(callback.data || "").startsWith("t:")) {
+      const key = callback.data.slice(2);
       if (SITE_KEYS.includes(key)) {
         const user = await getOrCreateUser(env, chatId);
-        const set = new Set(user.sites.split(",").filter(Boolean));
-        if (set.has(key)) set.delete(key);
-        else set.add(key);
-        const sites = SITE_KEYS.filter((k) => set.has(k)).join(",");
-        await env.DB.prepare("UPDATE users SET sites = ?1 WHERE chat_id = ?2").bind(sites, chatId).run();
+        const selected = new Set(parseSites(user.sites));
+        if (selected.has(key)) selected.delete(key); else selected.add(key);
+        const nextSites = SITE_KEYS.filter((siteKey) => selected.has(siteKey));
+        await env.DB.prepare("UPDATE users SET sites = ?1 WHERE chat_id = ?2").bind(nextSites.join(","), chatId).run();
         await tg(env, "editMessageReplyMarkup", {
           chat_id: chatId,
-          message_id: cq.message.message_id,
-          reply_markup: sitesKeyboard([...set]),
+          message_id: callback.message.message_id,
+          reply_markup: sitesKeyboard(nextSites),
         });
       }
     }
-  } catch (e) {
-    console.error("callback failed:", String(e));
+  } catch (error) {
+    console.error(`[callback] failed: ${String(error)}`);
   }
-  await tg(env, "answerCallbackQuery", { callback_query_id: cq.id }).catch(() => {});
+  await tg(env, "answerCallbackQuery", { callback_query_id: callback.id }).catch(() => {});
 }
 
 function sitesKeyboard(selected) {
   return {
-    inline_keyboard: SITES.map((s) => [
-      { text: `${selected.includes(s.key) ? "✅" : "❌"} ${s.name}`, callback_data: `t:${s.key}` },
-    ]),
+    inline_keyboard: SITES.map((site) => [{
+      text: `${selected.includes(site.key) ? "✅" : "❌"} ${site.name}`,
+      callback_data: `t:${site.key}`,
+    }]),
   };
 }
 
@@ -618,205 +598,307 @@ async function getOrCreateUser(env, chatId) {
   return withSchema(env, async () => {
     await env.DB.prepare(
       "INSERT OR IGNORE INTO users (chat_id, active, sites, keywords, created_at) VALUES (?1, 1, ?2, '', ?3)"
-    )
-      .bind(chatId, DEFAULT_SITES, Math.floor(Date.now() / 1000))
-      .run();
+    ).bind(chatId, DEFAULT_SITES, Math.floor(Date.now() / 1000)).run();
     return env.DB.prepare("SELECT chat_id, active, sites, keywords FROM users WHERE chat_id = ?1").bind(chatId).first();
   });
 }
 
 // ---------------------------------------------------------------------
-//  Telegram API
+// Telegram API / formatting
 // ---------------------------------------------------------------------
 async function tg(env, method, payload) {
-  const res = await fetch(`https://api.telegram.org/bot${env.BOT_TOKEN}/${method}`, {
+  if (!env.BOT_TOKEN) throw new Error("BOT_TOKEN secret is missing");
+  const response = await fetch(`https://api.telegram.org/bot${env.BOT_TOKEN}/${method}`, {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify(payload),
   });
-  const data = await res.json().catch(() => ({}));
-  if (!res.ok || data.ok === false) {
-    const err = new Error(`Telegram ${method} ${res.status}: ${data.description || ""}`);
-    err.status = res.status;
-    throw err;
+  const data = await response.json().catch(() => ({}));
+  if (!response.ok || data.ok === false) {
+    const error = new Error(`Telegram ${method} HTTP ${response.status}: ${data.description || "unknown error"}`);
+    error.status = response.status;
+    throw error;
   }
   return data;
 }
 
-const sendMessage = (env, chat_id, text, extra = {}) =>
-  tg(env, "sendMessage", { chat_id, text, parse_mode: "HTML", disable_web_page_preview: true, ...extra });
+const sendMessage = (env, chat_id, text, extra = {}) => tg(env, "sendMessage", {
+  chat_id,
+  text,
+  parse_mode: "HTML",
+  disable_web_page_preview: true,
+  ...extra,
+});
 
-function formatMessage(site, p) {
-  const lines = [`🆕 <b>${esc(p.title)}</b>`, `🌐 ${esc(site.name)}`];
-  if (p.budget) lines.push(`💰 ${esc(p.budget)}`);
-  for (const e of p.extra || []) lines.push(`📌 ${esc(e)}`);
-  if (p.skills?.length) lines.push(`🏷 ${esc(p.skills.join("، "))}`);
-  if (p.description) lines.push("", esc(truncate(p.description, 1800)));
-  lines.push("", `🔗 <a href="${esc(safeUrl(p.url))}">فتح المشروع</a>`);
+function formatMessage(site, project) {
+  const lines = [`🆕 <b>${esc(project.title || `مشروع جديد #${project.id}`)}</b>`, `🌐 ${esc(site.name)}`];
+  if (project.budget) lines.push(`💰 ${esc(project.budget)}`);
+  for (const item of project.extra || []) lines.push(`📌 ${esc(item)}`);
+  if (project.skills?.length) lines.push(`🏷 ${esc(project.skills.join("، "))}`);
+  if (project.description) lines.push("", esc(truncate(project.description, MAX_DESCRIPTION)));
+  lines.push("", `🔗 <a href="${esc(safeUrl(project.url))}">فتح المشروع</a>`);
   return lines.join("\n");
 }
 
 // ---------------------------------------------------------------------
-//  D1
+// D1/schema
 // ---------------------------------------------------------------------
 async function loadState(env) {
-  const { results } = await env.DB.prepare("SELECT site, last_id FROM state").all();
-  return Object.fromEntries(results.map((r) => [r.site, r.last_id]));
+  const { results = [] } = await env.DB.prepare("SELECT site, last_id FROM state").all();
+  return Object.fromEntries(results.map((row) => [row.site, Number(row.last_id)]));
 }
 
 async function loadUsers(env) {
-  const { results } = await env.DB.prepare("SELECT chat_id, sites, keywords FROM users WHERE active = 1").all();
+  const { results = [] } = await env.DB.prepare("SELECT chat_id, sites, keywords FROM users WHERE active = 1").all();
   return results;
 }
 
-// لو الجداول لسه مش موجودة بننشئها تلقائي ونعيد المحاولة
-async function withSchema(env, fn) {
+async function withSchema(env, callback) {
   try {
-    return await fn();
-  } catch (e) {
-    if (/no such table/i.test(String(e))) {
-      await env.DB.batch(SCHEMA.map((s) => env.DB.prepare(s)));
-      return await fn();
+    return await callback();
+  } catch (error) {
+    if (/no such table/i.test(String(error))) {
+      await env.DB.batch(SCHEMA.map((statement) => env.DB.prepare(statement)));
+      return await callback();
     }
-    throw e;
+    throw error;
   }
 }
 
 // ---------------------------------------------------------------------
-//  Dry run: للتأكد إن الـ parsers شغالة (من غير إرسال ولا تخزين)
+// Admin-only dry run and setup endpoints
 // ---------------------------------------------------------------------
 async function dryRun() {
-  const out = {};
-  await Promise.all(
-    SITES.map(async (site) => {
-      try {
-        const items = await site.list();
-        const sorted = items.slice().sort((a, b) => b.id - a.id);
-        let sample = null;
-        if (sorted[0]) {
-          sample = site.detail ? await site.detail(sorted[0]) : sorted[0];
-          sample = { ...sample, description: truncate(sample.description || "", 400) };
-        }
-        out[site.key] = { found: items.length, newestIds: sorted.slice(0, 5).map((x) => x.id), sample };
-      } catch (e) {
-        out[site.key] = { error: String(e) };
+  const output = {};
+  await Promise.all(SITES.map(async (site) => {
+    try {
+      const items = await site.list();
+      const sorted = items.slice().sort((a, b) => Number(b.id) - Number(a.id));
+      let sample = null;
+      if (sorted[0]) {
+        sample = site.detail ? await site.detail(sorted[0]) : sorted[0];
+        sample = { ...sample, description: truncate(sample.description || "", 500) };
       }
-    })
-  );
-  return out;
+      output[site.key] = { found: items.length, newestIds: sorted.slice(0, 5).map((item) => item.id), sample };
+    } catch (error) {
+      output[site.key] = { error: String(error) };
+    }
+  }));
+  return output;
 }
 
 // ---------------------------------------------------------------------
-//  أدوات مساعدة
+// Helpers
 // ---------------------------------------------------------------------
-function matchesKeywords(keywords, hay) {
-  if (!keywords) return true;
-  return keywords.split(",").some((k) => k && hay.includes(k));
+function parseSites(value) {
+  return String(value || "").split(",").map((site) => site.trim()).filter((site) => SITE_KEYS.includes(site));
+}
+
+function matchesKeywords(keywords, haystack) {
+  const terms = String(keywords || "").split(",").map((term) => term.trim().toLocaleLowerCase()).filter(Boolean);
+  if (!terms.length) return true;
+  return terms.some((term) => haystack.includes(term));
 }
 
 function meta(html, name) {
-  const tags = html.match(/<meta\b[^>]*>/gi) || [];
-  for (const t of tags) {
-    if (new RegExp(`(?:property|name)=["']${name}["']`, "i").test(t)) {
-      const m = t.match(/content=["']([^"']*)["']/i);
-      if (m) return decode(m[1]).trim();
+  for (const tag of String(html).match(/<meta\b[^>]*>/gi) || []) {
+    const key = getAttribute(tag, "property") || getAttribute(tag, "name") || getAttribute(tag, "itemprop");
+    if (String(key).toLowerCase() === String(name).toLowerCase()) {
+      const content = getAttribute(tag, "content");
+      if (content) return cleanText(content);
     }
   }
   return "";
 }
 
+function getAttribute(tag, name) {
+  const escaped = name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const match = String(tag).match(new RegExp(`\\b${escaped}\\s*=\\s*(["'])([\\s\\S]*?)\\1`, "i"));
+  return match ? decode(match[2]) : "";
+}
+
+function firstTagText(html, tagName) {
+  const match = String(html).match(new RegExp(`<${tagName}\\b[^>]*>([\\s\\S]*?)<\\/${tagName}>`, "i"));
+  return match ? htmlToText(match[1]) : "";
+}
+
+function titleFromUrl(value) {
+  try {
+    let slug = decodeURIComponent(new URL(value).pathname.split("/").filter(Boolean).pop() || "");
+    slug = slug.replace(/^\d+[-_]?/, "").replace(/[-_]+/g, " ").replace(/\s+/g, " ").trim();
+    return cleanText(slug);
+  } catch (_) {
+    return "";
+  }
+}
+
+function cleanTitle(value, siteKey) {
+  let title = cleanText(value);
+  title = title.replace(/\s*[|–—-]\s*(مستقل|خمسات|نفذلي|كفيل|كافيل|Mostaql|Khamsat|Nafezly|Kafiil|Freelancer).*$/i, "").trim();
+  if (siteKey === "khamsat") title = title.replace(/^طلبات الخدمات غير الموجودة\s*[|–—-]?\s*/i, "").trim();
+  return title;
+}
+
+function isGenericTitle(title, siteKey) {
+  if (!title) return true;
+  if (siteKey === "khamsat" && /^(?:طلبات الخدمات غير الموجودة|خمسات|المجتمع)(?:\s|$)/i.test(title)) return true;
+  return /^(مشروع جديد|project)\s*#?\d+$/i.test(title);
+}
+
+function textAfterAnyLabel(text, startLabels, stopLabels) {
+  const source = String(text || "");
+  const lower = source.toLocaleLowerCase();
+  let chosen = null;
+  for (const label of startLabels) {
+    const index = lower.indexOf(label.toLocaleLowerCase());
+    if (index >= 0 && (!chosen || index < chosen.index)) chosen = { index, label };
+  }
+  if (!chosen) return "";
+  let start = chosen.index + chosen.label.length;
+  while (start < source.length && /[\s:：،-]/.test(source[start])) start++;
+  let end = source.length;
+  for (const label of stopLabels) {
+    const index = lower.indexOf(label.toLocaleLowerCase(), start);
+    if (index >= 0 && index < end) end = index;
+  }
+  return cleanText(source.slice(start, end)).slice(0, 6000);
+}
+
+function extractBudget(text) {
+  const source = normalizeDigits(String(text || ""));
+  const label = /(?:الميزانية(?:\s+المتوقعة)?|ميزانية المشروع|budget|estimated budget|price range)\s*[:：]?/i.exec(source);
+  if (!label) return "";
+  const after = source.slice(label.index + label[0].length, label.index + label[0].length + 220);
+  const amount = /(?:[$€£]\s*)?\d+(?:[,.٫]\d+)?(?:\s*(?:-|–|—|إلى|الى|to)\s*(?:[$€£]\s*)?\d+(?:[,.٫]\d+)?)?(?:\s*(?:USD|US\$|EUR|GBP|SAR|EGP|دولار(?:اً)?|ريال(?:اً)?|جنيه(?:اً)?))?/i.exec(after);
+  if (!amount || !/\d/.test(amount[0])) return "";
+  const value = cleanText(amount[0]);
+  return value.length <= 65 ? value : "";
+}
+
+function normalizeDigits(value) {
+  return String(value).replace(/[٠-٩]/g, (digit) => String("٠١٢٣٤٥٦٧٨٩".indexOf(digit))).replace(/٫/g, ".");
+}
+
+function normalizeDescription(value, title) {
+  let result = cleanText(value);
+  if (!isUsefulDescription(result, title)) return "";
+  // Remove common adjacent labels at the beginning/end of scraped content.
+  result = result.replace(/^(?:تفاصيل المشروع|تفاصيل الطلب|وصف المشروع|الوصف)\s*[:：-]?\s*/i, "");
+  result = result.replace(/\s+(?:حالة المشروع|عدد العروض|آخر تفاعل)\s*:?\s*[\s\S]*$/i, "").trim();
+  return isUsefulDescription(result, title) ? result.slice(0, 6000) : "";
+}
+
+function isUsefulDescription(value, title) {
+  const text = cleanText(value);
+  if (text.length < 25) return false;
+  if (title && text.toLocaleLowerCase() === cleanText(title).toLocaleLowerCase()) return false;
+  if (/^(?:تسجيل الدخول|إنشاء حساب|طلبات الخدمات غير الموجودة|الرئيسية|أضف مشروعك|بحث|التصنيفات)$/i.test(text)) return false;
+  return true;
+}
+
 function htmlToText(html) {
-  return decode(
-    html
-      .replace(/<script[\s\S]*?<\/script>/gi, " ")
-      .replace(/<style[\s\S]*?<\/style>/gi, " ")
-      .replace(/<(br|\/p|\/div|\/li|\/h[1-6]|\/tr)\s*\/?>/gi, "\n")
-      .replace(/<[^>]+>/g, " ")
-  )
-    .replace(/[ \t\u00a0]+/g, " ")
+  return decode(String(html)
+    .replace(/<!--([\s\S]*?)-->/g, " ")
+    .replace(/<script\b[\s\S]*?<\/script>/gi, " ")
+    .replace(/<style\b[\s\S]*?<\/style>/gi, " ")
+    .replace(/<svg\b[\s\S]*?<\/svg>/gi, " ")
+    .replace(/<(br|\/p|\/div|\/li|\/h[1-6]|\/tr|\/section|\/article|\/blockquote)\b[^>]*>/gi, "\n")
+    .replace(/<[^>]+>/g, " "))
+    .replace(/[\t\u00a0 ]+/g, " ")
+    .replace(/ *\n */g, "\n")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
+}
+
+function cleanText(value) {
+  return decode(String(value ?? "").replace(/<[^>]+>/g, " "))
+    .replace(/[\t\u00a0 ]+/g, " ")
     .replace(/\s*\n\s*/g, "\n")
     .trim();
 }
 
-function textBetween(text, a, b) {
-  const i = text.indexOf(a);
-  if (i < 0) return "";
-  const start = i + a.length;
-  const end = text.indexOf(b, start);
-  if (end < 0) return "";
-  return text.slice(start, end).trim();
-}
-
-function decode(s) {
-  return String(s)
-    .replace(/&#x([0-9a-f]+);/gi, (_, h) => String.fromCodePoint(parseInt(h, 16)))
-    .replace(/&#(\d+);/g, (_, d) => String.fromCodePoint(Number(d)))
-    .replace(/&nbsp;/g, " ")
+function decode(value) {
+  return String(value)
+    .replace(/&#x([0-9a-f]+);/gi, (_, hex) => safeCodePoint(parseInt(hex, 16)))
+    .replace(/&#(\d+);/g, (_, dec) => safeCodePoint(Number(dec)))
+    .replace(/&nbsp;|&#160;/gi, " ")
     .replace(/&lt;/g, "<")
     .replace(/&gt;/g, ">")
     .replace(/&quot;/g, '"')
     .replace(/&#39;|&apos;/g, "'")
-    .replace(/&amp;/g, "&");
+    .replace(/&amp;/g, "&")
+    .replace(/&ndash;/g, "–")
+    .replace(/&mdash;/g, "—");
 }
 
-const esc = (s) =>
-  String(s ?? "")
-    .replace(/&/g, "&amp;")
-    .replace(/</g, "&lt;")
-    .replace(/>/g, "&gt;")
-    .replace(/"/g, "&quot;");
+function safeCodePoint(value) {
+  try { return String.fromCodePoint(value); } catch (_) { return ""; }
+}
 
-const truncate = (s, n) => (s.length > n ? s.slice(0, n).trimEnd() + "…" : s);
-const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+const esc = (value) => String(value ?? "")
+  .replace(/&/g, "&amp;")
+  .replace(/</g, "&lt;")
+  .replace(/>/g, "&gt;")
+  .replace(/"/g, "&quot;");
 
-// يضمن إن اللينك صالح: بيرمّز الحروف العربية ويشيل أي رموز زيادة في آخره
-function safeUrl(u) {
+const truncate = (value, max) => {
+  const text = String(value || "");
+  return text.length > max ? `${text.slice(0, max).trimEnd()}…` : text;
+};
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+function safeUrl(value) {
   try {
-    return new URL(decode(String(u)).replace(/[\\,;.]+$/, "")).href;
-  } catch {
-    return String(u);
+    const url = new URL(decode(String(value)).replace(/[\\,;.]+$/, ""));
+    if (url.protocol !== "https:" && url.protocol !== "http:") return "https://example.com";
+    return url.href;
+  } catch (_) {
+    return "https://example.com";
   }
 }
 
-// نسخة نص عادي من الرسالة (اللينك بيظهر كامل) للاستخدام لو تيليجرام رفض الـ HTML
 function toPlain(html) {
-  return decode(html.replace(/<a href="([^"]*)">[^<]*<\/a>/g, "$1").replace(/<\/?b>/g, ""));
+  return decode(String(html)
+    .replace(/<a\s+href="([^"]+)"[^>]*>([\s\S]*?)<\/a>/gi, "$2 ($1)")
+    .replace(/<\/?(?:b|strong|i|em)\b[^>]*>/gi, "")
+    .replace(/<[^>]+>/g, " "))
+    .replace(/[\t ]+/g, " ")
+    .trim();
+}
+
+function isBlockedChatError(error) {
+  const message = String(error || "").toLowerCase();
+  return error?.status === 403 || (error?.status === 400 && /(chat not found|bot was blocked|user is deactivated|can't initiate conversation)/i.test(message));
 }
 
 // ---------------------------------------------------------------------
-//  Entry points
+// Worker entry points
 // ---------------------------------------------------------------------
 export default {
-  async scheduled(event, env, ctx) {
-    ctx.waitUntil(
-      run(env).catch((error) => {
-        console.error('[scheduled] run failed:', String(error), error?.stack || '');
-      })
-    );
+  async scheduled(_event, env, ctx) {
+    ctx.waitUntil(run(env).catch((error) => {
+      console.error(`[scheduled] run failed: ${String(error)} ${error?.stack || ""}`);
+    }));
   },
 
-  async fetch(request, env, ctx) {
+  async fetch(request, env) {
     const url = new URL(request.url);
 
-    // Telegram webhook
     if (url.pathname === "/webhook" && request.method === "POST") {
       const secret = request.headers.get("x-telegram-bot-api-secret-token");
-      if (!env.WEBHOOK_SECRET || secret !== env.WEBHOOK_SECRET) {
-        return new Response("forbidden", { status: 403 });
-      }
+      if (!env.WEBHOOK_SECRET || secret !== env.WEBHOOK_SECRET) return new Response("forbidden", { status: 403 });
       try {
         await handleUpdate(env, await request.json());
-      } catch (e) {
-        console.error("update failed:", String(e));
+      } catch (error) {
+        console.error(`[webhook] update failed: ${String(error)} ${error?.stack || ""}`);
       }
-      return new Response("ok"); // دايماً 200 عشان تيليجرام ميعيدش الإرسال
+      return new Response("ok");
     }
 
-    // صفحات الأدمن
-    const isAdmin = env.ADMIN_KEY && url.searchParams.get("key") === env.ADMIN_KEY;
+    // Keep diagnostic/setup endpoints private. No ADMIN_KEY is needed for normal cron/webhook operation.
+    const isAdmin = Boolean(env.ADMIN_KEY) && url.searchParams.get("key") === env.ADMIN_KEY;
     if (!isAdmin) return new Response("OK");
 
-    // /setup?key=ADMIN_KEY : يسجل الـ webhook والأوامر
     if (url.pathname === "/setup") {
       try {
         const hook = await tg(env, "setWebhook", {
@@ -825,35 +907,44 @@ export default {
           allowed_updates: ["message", "callback_query"],
           drop_pending_updates: true,
         });
-        const cmds = await tg(env, "setMyCommands", {
+        const commands = await tg(env, "setMyCommands", {
           commands: [
             { command: "start", description: "تشغيل الإشعارات" },
             { command: "sites", description: "اختيار المواقع" },
-            { command: "keywords", description: "فلتر بكلمات مفتاحية" },
+            { command: "keywords", description: "فلتر بالكلمات المفتاحية" },
             { command: "status", description: "إعداداتي" },
             { command: "stop", description: "إيقاف الإشعارات" },
             { command: "help", description: "مساعدة" },
           ],
         });
-        return Response.json({ hook, cmds });
-      } catch (e) {
-        return new Response(String(e), { status: 500 });
+        return Response.json({ hook, commands });
+      } catch (error) {
+        return new Response(String(error), { status: 500 });
       }
     }
 
-    // /?key=ADMIN_KEY&ping=<chat_id> : رسالة اختبار
-    if (url.searchParams.get("ping")) {
+    if (url.searchParams.has("ping")) {
       try {
         await sendMessage(env, url.searchParams.get("ping"), "✅ البوت شغال");
         return new Response("sent");
-      } catch (e) {
-        return new Response(String(e), { status: 500 });
+      } catch (error) {
+        return new Response(String(error), { status: 500 });
       }
     }
 
-    // /?key=ADMIN_KEY : يعرض اللي الـ parsers شايفاه
-    return new Response(JSON.stringify(await dryRun(), null, 2), {
-      headers: { "content-type": "application/json; charset=utf-8" },
-    });
+    if (url.searchParams.get("db") === "1") {
+      try {
+        const [state, users, outbox] = await Promise.all([
+          env.DB.prepare("SELECT site, last_id FROM state ORDER BY site").all(),
+          env.DB.prepare("SELECT chat_id, active, sites, keywords FROM users ORDER BY created_at DESC LIMIT 50").all(),
+          env.DB.prepare("SELECT COUNT(*) AS total FROM outbox").first(),
+        ]);
+        return Response.json({ state: state.results, users: users.results, outbox: outbox.total });
+      } catch (error) {
+        return new Response(String(error), { status: 500 });
+      }
+    }
+
+    return Response.json(await dryRun());
   },
 };
