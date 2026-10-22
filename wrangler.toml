@@ -11,7 +11,7 @@ crons = ["* * * * *"]
 [[d1_databases]]
 binding = "DB"
 database_name = "jobs"
-database_id = "PUT_YOUR_D1_DATABASE_ID_HERE"
+database_id = "b5084387-fa31-4f9a-bbb8-ecc1beff9c88"
 
 # الـ Secrets بتتضاف بالأوامر دي (مش هنا):
 #   npx wrangler secret put BOT_TOKEN
