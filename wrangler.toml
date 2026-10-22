@@ -13,6 +13,15 @@ binding = "DB"
 database_name = "jobs"
 database_id = "b5084387-fa31-4f9a-bbb8-ecc1beff9c88"
 
+[observability]
+enabled = true
+head_sampling_rate = 1
+
+[observability.logs]
+enabled = true
+invocation_logs = true
+persist = true
+
 # الـ Secrets بتتضاف بالأوامر دي (مش هنا):
 #   npx wrangler secret put BOT_TOKEN
 #   npx wrangler secret put WEBHOOK_SECRET
