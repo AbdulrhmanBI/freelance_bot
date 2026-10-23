@@ -13,6 +13,8 @@
 // =====================================================================
 
 const MAX_NEW_PER_RUN = 10;
+const MAX_FRESH_BURST = 15; // more new projects than this in one minute = anomaly (outage / id change)
+const BURST_KEEP_NEWEST = 5; // in an anomaly, only the newest few are sent
 const SEND_BATCH = 30;
 const MAX_KEYWORDS = 20;
 const DEFAULT_SITES = "kafiil,mostaql,nafezly,khamsat,freelancer";
@@ -537,7 +539,8 @@ function extractTelegramPosts(html) {
     const postMatch = block.match(/data-post=["'][^"'\/]*\/(\d+)["']/i);
     const bodyMatch = block.match(/<div\b[^>]*class=["'][^"']*\btgme_widget_message_text\b[^"']*["'][^>]*>([\s\S]*?)<\/div>/i);
     if (!postMatch || !bodyMatch) continue;
-    const links = [...bodyMatch[1].matchAll(/href=["']([^"']+)["']/gi)].map((m) => decode(m[1]));
+    // Links can be in the text OR in the inline keyboard button ("open request") under the post.
+    const links = [...block.matchAll(/href=["']([^"']+)["']/gi)].map((m) => decode(m[1]));
     posts.push({ messageId: Number(postMatch[1]), text: htmlToText(bodyMatch[1]), links });
   }
   return posts;
@@ -555,6 +558,7 @@ const REQUEST_LABELS = {
 function stripPostDecoration(line) {
   return String(line || "")
     .replace(/[*_`~]/g, "")
+    .replace(/^(?:\s*[0-9#*]\uFE0F?\u20E3)+/u, "")
     .replace(/^[\s\p{Extended_Pictographic}\p{Emoji_Presentation}\uFE0F\u200d\u200f\u200e•▪▫◾◽➖➡▶►»«\-–—#|]+/u, "")
     .trim();
 }
@@ -575,8 +579,14 @@ function matchRequestLabel(line) {
 function parseRequestPost(text) {
   const lines = String(text || "").split("\n").map((line) => line.trim()).filter(Boolean);
   const buckets = { title: [], description: [], budget: [], duration: [], skip: [], preamble: [] };
+  const ownerBits = [];
   let current = "preamble";
   for (const line of lines) {
+    // "👤 name" / "🎖 level N" lines describe the buyer; keep them out of the description.
+    if (current === "preamble" && buckets.preamble.length >= 1 && /^\s*(?:\u{1F464}|\u{1F396}|\u{1F3C5}|\u{1F947}|\u{1F948}|\u{1F949})/u.test(line)) {
+      ownerBits.push(stripPostDecoration(line));
+      continue;
+    }
     const label = matchRequestLabel(line);
     if (label) {
       current = label.field;
@@ -607,6 +617,7 @@ function parseRequestPost(text) {
   const duration = cleanText(clean(buckets.duration));
   return {
     title: title.replace(/^[:：-]\s*/, ""),
+    owner: ownerBits.join(" • "),
     description: cleanText(description).slice(0, 6000),
     budget: /\d/.test(budget) ? budget.slice(0, 65) : "",
     duration: duration && duration.length <= 40 ? duration : "",
@@ -614,10 +625,10 @@ function parseRequestPost(text) {
 }
 
 function buildKhamsatItems(posts) {
-  const requestUrlRe = /^https?:\/\/(?:www\.)?khamsat\.com\/community\/requests\/(\d+)(?:-[^?#\s]*)?/i;
+  const requestUrlRe = /^https?:\/\/(?:www\.)?khamsat\.com\/(?:[a-z]{2}\/)?community\/requests\/(\d+)(?:-[^?#\s]*)?/i;
   const withLink = posts.map((post) => {
     const linkMatch = post.links.map((href) => href.match(requestUrlRe)).find(Boolean)
-      || post.text.match(/https?:\/\/(?:www\.)?khamsat\.com\/community\/requests\/(\d+)(?:-[^?#\s]*)?/i);
+      || post.text.match(/https?:\/\/(?:www\.)?khamsat\.com\/(?:[a-z]{2}\/)?community\/requests\/(\d+)(?:-[^?#\s]*)?/i);
     return { ...post, requestId: linkMatch ? Number(linkMatch[1]) : 0, requestUrl: linkMatch ? linkMatch[0] : "" };
   });
 
@@ -638,7 +649,7 @@ function buildKhamsatItems(posts) {
       description: normalizeDescription(parsed.description, title, 3),
       budget: parsed.budget,
       skills: [],
-      extra: parsed.duration ? [`المدة: ${parsed.duration}`] : [],
+      extra: [parsed.owner ? `صاحب الطلب: ${parsed.owner}` : "", parsed.duration ? `المدة: ${parsed.duration}` : ""].filter(Boolean),
       source: "khamsat-telegram",
       debug: { mode: useRequestIds ? "request-id-from-link" : "telegram-message-id", messageId: post.messageId },
     };
@@ -646,6 +657,29 @@ function buildKhamsatItems(posts) {
     if (!existing || item.description.length > existing.description.length) items.set(id, item);
   }
   return [...items.values()].sort((a, b) => a.id - b.id);
+}
+
+// When a channel post carries no khamsat.com link, find the same request on the khamsat.com
+// listing (by title) so the notification still opens the request itself, never the Telegram post.
+async function resolveKhamsatLinksFromListing(items) {
+  let listing = [];
+  try {
+    listing = await khamsatSite.list();
+  } catch (error) {
+    console.warn(`[khamsat] listing lookup for direct links failed: ${String(error)}`);
+    return [];
+  }
+  const norm = (value) => cleanText(value).replace(/[^\p{L}\p{N}]+/gu, " ").trim().toLocaleLowerCase();
+  const index = listing.map((entry) => ({ ...entry, key: norm(entry.title) })).filter((entry) => entry.key);
+  const resolved = [];
+  for (const item of items) {
+    const key = norm(item.title);
+    if (key.length < 8) continue;
+    const hit = index.find((entry) => entry.key === key)
+      || index.find((entry) => entry.key.length >= 12 && key.length >= 12 && (entry.key.startsWith(key.slice(0, 25)) || key.startsWith(entry.key.slice(0, 25))));
+    if (hit) resolved.push({ ...item, id: hit.id, url: hit.url, debug: { ...(item.debug || {}), mode: "matched-from-khamsat-listing" } });
+  }
+  return resolved.sort((a, b) => a.id - b.id);
 }
 
 const khamsatTelegram = {
@@ -658,9 +692,17 @@ const khamsatTelegram = {
     });
     if (!response.ok) throw new Error(`khamsat Telegram feed HTTP ${response.status}`);
     const posts = extractTelegramPosts(await response.text());
-    const items = buildKhamsatItems(posts);
+    let items = buildKhamsatItems(posts);
     console.log(`[khamsat] source=public Telegram feed; posts=${posts.length}; requests=${items.length}; mode=${items[0]?.debug?.mode || "none"}`);
     if (!items.length) throw new Error("Khamsat Telegram feed loaded but no request posts could be parsed");
+
+    if (items[0].debug?.mode === "telegram-message-id") {
+      // The posts have no khamsat.com link: look the requests up on khamsat.com to get the real link.
+      const matched = await resolveKhamsatLinksFromListing(items);
+      console.log(`[khamsat] posts without a link: matched ${matched.length}/${items.length} on the khamsat.com listing`);
+      if (!matched.length) throw new Error("Khamsat posts carry no request link and none could be matched on khamsat.com; refusing to send Telegram-channel links");
+      items = matched;
+    }
     return items;
   },
   async detail(item) {
@@ -1070,11 +1112,32 @@ async function run(env) {
     }
 
     const lastId = Number(state[site.key]);
-    const fresh = items
+
+    // The ID space changed (for example a source switched from site ids to Telegram message ids).
+    // Re-baseline instead of waiting forever (stored > newest) or flooding users (stored << newest).
+    const jumped = (a, b) => a > b * 1.5 && a - b > 100000;
+    if (jumped(lastId, newestId) || jumped(newestId, lastId)) {
+      await env.DB.prepare("UPDATE state SET last_id = ?1 WHERE site = ?2").bind(newestId, site.key).run();
+      state[site.key] = newestId;
+      console.warn(`[${site.key}] id space changed (stored=${lastId}, newest=${newestId}); re-baselined without sending old projects`);
+      continue;
+    }
+
+    let fresh = items
       .filter((item) => Number(item.id) > lastId)
       .sort((a, b) => Number(a.id) - Number(b.id));
     console.log(`[${site.key}] freshProjects=${fresh.length}`);
     if (!fresh.length) continue;
+
+    // A normal minute brings 0-3 projects. A big burst means something went wrong (outage, id change):
+    // send only the newest few instead of dumping the whole backlog on users.
+    let burstSkippedUpTo = lastId;
+    if (fresh.length > MAX_FRESH_BURST) {
+      const skipped = fresh.slice(0, fresh.length - BURST_KEEP_NEWEST);
+      burstSkippedUpTo = Number(skipped[skipped.length - 1].id);
+      fresh = fresh.slice(-BURST_KEEP_NEWEST);
+      console.warn(`[${site.key}] burst of ${skipped.length + fresh.length} new projects; skipping ${skipped.length} older and sending the newest ${fresh.length}`);
+    }
 
     const audience = users.filter((user) => parseSites(user.sites).includes(site.key));
     if (!audience.length) {
@@ -1084,7 +1147,7 @@ async function run(env) {
       continue;
     }
 
-    let lastProcessedId = lastId;
+    let lastProcessedId = burstSkippedUpTo;
     for (const item of fresh) {
       if (processed >= MAX_NEW_PER_RUN) {
         console.warn(`[run] MAX_NEW_PER_RUN=${MAX_NEW_PER_RUN} reached; remaining projects will be handled in later runs`);
@@ -2275,7 +2338,7 @@ async function probePage(rawUrl) {
       // Raw text of the last posts (as the bot sees it) next to what the parser extracted from them.
       samples: posts.slice(-3).map((post) => ({
         messageId: post.messageId,
-        links: post.links.slice(0, 3),
+        links: post.links.slice(0, 8),
         rawText: post.text.slice(0, 1200),
         parsed: parseRequestPost(post.text),
       })),
@@ -2471,7 +2534,17 @@ function decode(value) {
     .replace(/&#39;|&apos;/g, "'")
     .replace(/&amp;/g, "&")
     .replace(/&ndash;/g, "–")
-    .replace(/&mdash;/g, "—");
+    .replace(/&mdash;/g, "—")
+    .replace(/&hellip;/g, "…")
+    .replace(/&laquo;/g, "«")
+    .replace(/&raquo;/g, "»")
+    .replace(/&bull;/g, "•")
+    .replace(/&middot;/g, "·")
+    .replace(/&zwj;/gi, "\u200d")
+    .replace(/&zwnj;/gi, "\u200c")
+    // Invisible direction marks (&rlm; &lrm; and their characters) only add noise to the message.
+    .replace(/&(?:rlm|lrm);/gi, "")
+    .replace(/[\u200b\u200e\u200f\u202a-\u202e\u2066-\u2069\ufeff]/g, "");
 }
 
 function safeCodePoint(value) {
