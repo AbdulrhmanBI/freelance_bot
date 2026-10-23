@@ -1,6 +1,7 @@
 // =====================================================================
 // Freelance Jobs Bot — Cloudflare Workers + Cron + D1
 // Sites: Kafiil, Mostaql, Nafezly (public Telegram feed), Khamsat, Freelancer
+// Fix: keep official nafezly.com project links unchanged; never rewrite their host.
 // Required bindings/secrets:
 //   DB (D1), BOT_TOKEN, WEBHOOK_SECRET, ADMIN_KEY; ADMIN_ID optional
 // Cron: * * * * *
@@ -249,18 +250,12 @@ function normalizeUnixSeconds(value) {
   return numeric > 0 ? numeric : null;
 }
 
-// Nafezly has publicly indexed project pages on nafzly.com (without the extra "e").
-// Telegram posts may still contain links on nafezly.com, so normalize known aliases
-// to the current public host first, then retry the original host if needed.
-function normalizeNafezlyProjectUrl(rawUrl) {
+// Preserve the exact project URL published by Nafezly's official Telegram feed.
+// Do not rewrite nafezly.com to another hostname: the rewritten links can fail to open.
+function preserveNafezlyProjectUrl(rawUrl) {
   try {
-    const url = new URL(rawUrl);
-    const host = url.hostname.toLowerCase();
-    if (["nafezly.com", "www.nafezly.com", "nafzly.com", "www.nafzly.com"].includes(host)) {
-      url.protocol = "https:";
-      url.hostname = "nafzly.com";
-      url.port = "";
-    }
+    const url = new URL(String(rawUrl || ""));
+    if (url.protocol !== "https:" && url.protocol !== "http:") return String(rawUrl || "");
     return url.href;
   } catch {
     return String(rawUrl || "");
@@ -287,9 +282,10 @@ const nafezlyTelegram = {
     return items;
   },
   async detail(item) {
-    const feedItem = { ...item, url: normalizeNafezlyProjectUrl(item.url) };
-    const originalUrl = String(item.url || "");
-    const candidates = [...new Set([feedItem.url, originalUrl].filter(Boolean))];
+    // Keep the source URL exactly as published in the Telegram channel.
+    const originalUrl = preserveNafezlyProjectUrl(item.url);
+    const feedItem = { ...item, url: originalUrl };
+    const candidates = originalUrl ? [originalUrl] : [];
     const feedDescription = cleanText(feedItem.description || "");
     let lastReason = "no page attempt succeeded";
 
@@ -299,7 +295,7 @@ const nafezlyTelegram = {
           headers: {
             ...HEADERS,
             Accept: "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-            Referer: "https://nafzly.com/projects",
+            Referer: "https://nafezly.com/projects",
           },
           redirect: "follow",
         });
@@ -313,7 +309,7 @@ const nafezlyTelegram = {
         const html = await response.text();
         if (looksLikeChallenge(html) || /javascript\s+is\s+disabled|enable\s+javascript/i.test(html.slice(0, 30000))) {
           lastReason = `challenge/JavaScript placeholder on ${host}`;
-          console.warn(`[nafezly] detail page was a challenge/JS placeholder for #${item.id} on ${host}; trying alternate host if available`);
+          console.warn(`[nafezly] detail page was a challenge/JS placeholder for #${item.id} on ${host}; preserving the official Telegram project link`);
           continue;
         }
 
@@ -323,7 +319,7 @@ const nafezlyTelegram = {
         const pageHasUsefulData = titleIsUseful || isUsefulDescription(pageDescription, pageItem.title || feedItem.title);
         if (!pageHasUsefulData) {
           lastReason = `page parsed but no useful project content on ${host}`;
-          console.warn(`[nafezly] detail parse yielded no useful content for #${item.id} on ${host}; trying alternate host if available`);
+          console.warn(`[nafezly] detail parse yielded no useful content for #${item.id} on ${host}; preserving the official Telegram project link`);
           continue;
         }
 
@@ -380,7 +376,7 @@ function parseNafezlyTelegramFeed(html) {
     description = normalizeDescription(description, title);
     budget = cleanText(budget).replace(/^[:：-]\s*/, "");
 
-    const url = normalizeNafezlyProjectUrl(urlMatch[1]);
+    const url = preserveNafezlyProjectUrl(urlMatch[1]);
     if (!title) title = titleFromUrl(url) || `مشروع جديد #${id}`;
 
     const item = {
