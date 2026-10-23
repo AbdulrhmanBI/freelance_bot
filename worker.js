@@ -1,6 +1,6 @@
 // =====================================================================
 // Freelance Jobs Bot — Cloudflare Workers + Cron + D1
-// Sites: Kafiil, Mostaql, Nafezly, Khamsat, Freelancer
+// Sites: Kafiil, Mostaql, Nafezly (public Telegram feed), Khamsat, Freelancer
 // Required bindings/secrets:
 //   DB (D1), BOT_TOKEN, WEBHOOK_SECRET, ADMIN_KEY; ADMIN_ID optional
 // Cron: * * * * *
@@ -119,6 +119,97 @@ const freelancer = {
   },
 };
 
+
+// Nafezly blocks requests from this Worker with HTTP 403.
+// Its public Telegram channel publishes project title, description, budget, and project link,
+// so use that public feed instead of repeatedly requesting the blocked listing page.
+const nafezlyTelegram = {
+  key: "nafezly",
+  name: "نفذلي",
+  async list() {
+    const response = await fetch("https://t.me/s/nafezly", {
+      headers: {
+        ...HEADERS,
+        Accept: "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        Referer: "https://t.me/",
+      },
+      redirect: "follow",
+    });
+    if (!response.ok) throw new Error(`nafezly Telegram feed HTTP ${response.status}`);
+    const html = await response.text();
+    const items = parseNafezlyTelegramFeed(html);
+    console.log(`[nafezly] source=public Telegram feed; found=${items.length}`);
+    if (!items.length) throw new Error("Nafezly Telegram feed loaded but no project posts could be parsed");
+    return items;
+  },
+  // The channel message already contains project details, so don't request nafezly.com again.
+  async detail(item) {
+    return item;
+  },
+};
+
+function parseNafezlyTelegramFeed(html) {
+  const source = String(html);
+  const wrapperRe = /<div\b[^>]*class=["'][^"']*\btgme_widget_message_wrap\b[^"']*["'][^>]*>/gi;
+  const wrappers = [...source.matchAll(wrapperRe)];
+  const projects = new Map();
+
+  for (let index = 0; index < wrappers.length; index++) {
+    const start = wrappers[index].index;
+    const end = index + 1 < wrappers.length ? wrappers[index + 1].index : source.length;
+    const block = source.slice(start, end);
+
+    const urlMatch = block.match(/href=["'](https?:\/\/(?:www\.)?nafezly\.com\/project\/(\d+)(?:-[^"'?#\s<>]*)?(?:\?[^"']*)?)["']/i);
+    if (!urlMatch) continue;
+
+    const bodyMatch = block.match(/<div\b[^>]*class=["'][^"']*\btgme_widget_message_text\b[^"']*["'][^>]*>([\s\S]*?)<\/div>/i);
+    if (!bodyMatch) continue;
+    const text = htmlToText(bodyMatch[1]);
+    if (!/تم\s+إضافة\s+مشروع\s+جديد/.test(text)) continue;
+
+    const id = Number(urlMatch[2]);
+    if (!Number.isSafeInteger(id) || id <= 0) continue;
+
+    let title = textBetweenLabels(text, "عنوان المشروع", "تفاصيل المشروع|الميزانية|رابط المشروع");
+    let description = textBetweenLabels(text, "تفاصيل المشروع", "الميزانية|رابط المشروع");
+    let budget = textBetweenLabels(text, "الميزانية", "رابط المشروع");
+    title = cleanText(title).replace(/^[:：-]\s*/, "");
+    description = normalizeDescription(description, title);
+    budget = cleanText(budget).replace(/^[:：-]\s*/, "");
+
+    const url = new URL(urlMatch[1]).href;
+    if (!title) title = titleFromUrl(url) || `مشروع جديد #${id}`;
+
+    const item = {
+      id,
+      url,
+      title,
+      description,
+      budget: /\d/.test(budget) ? budget.slice(0, 65) : "",
+      skills: [],
+      extra: [],
+      source: "nafezly-telegram",
+    };
+
+    const existing = projects.get(id);
+    if (!existing || item.description.length > existing.description.length) projects.set(id, item);
+  }
+
+  return [...projects.values()].sort((a, b) => a.id - b.id);
+}
+
+function textBetweenLabels(text, startLabel, endLabels) {
+  const input = String(text || "");
+  const startRe = new RegExp(`(?:^|\\n)\\s*${startLabel}\\s*[:：]\\s*`, "i");
+  const startMatch = startRe.exec(input);
+  if (!startMatch) return "";
+  const start = startMatch.index + startMatch[0].length;
+  const remainder = input.slice(start);
+  const endRe = new RegExp(`\\n\\s*(?:${endLabels})\\s*[:：]`, "i");
+  const endMatch = endRe.exec(remainder);
+  return cleanText(endMatch ? remainder.slice(0, endMatch.index) : remainder);
+}
+
 const SITES = [
   htmlSite({
     key: "kafiil",
@@ -134,13 +225,7 @@ const SITES = [
     listUrl: "https://mostaql.com/projects",
     linkRe: /\/project\/(\d+)(?:-[^"'\s<>?#]*)?/g,
   }),
-  htmlSite({
-    key: "nafezly",
-    name: "نفذلي",
-    base: "https://nafezly.com",
-    listUrl: "https://nafezly.com/projects",
-    linkRe: /\/project\/(\d+)(?:-[^"'\s<>?#]*)?/g,
-  }),
+  nafezlyTelegram,
   htmlSite({
     key: "khamsat",
     name: "خمسات",
@@ -948,4 +1033,3 @@ export default {
     return Response.json(await dryRun());
   },
 };
-
