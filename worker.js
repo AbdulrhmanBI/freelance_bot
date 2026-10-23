@@ -1255,6 +1255,28 @@ function classifyChannelProject(project) {
   const titleHas = (phrases) => categoryHasAny(title, phrases);
   const allHas = (phrases) => categoryHasAny(all, phrases);
   const bodyHas = (phrases) => categoryHasAny(`${description} ${skills}`.trim(), phrases);
+
+  // Hard out-of-scope guards: do not classify a project from incidental mentions
+  // such as "community management" in a game-development brief or "writing" in a
+  // legal-motion brief. The channel is for data/office/production tasks, not every
+  // project that happens to mention a supported skill.
+  const legalCore = [
+    "motion for extension", "motion to extend", "party deposition", "deposition deadline",
+    "rules of civil procedure", "court scheduling order", "proposed order", "litigation",
+    "legal writing", "legal research", "court filing", "court motion", "مذكرة قانونية",
+    "بحث قانوني", "صياغة قانونية", "محكمة", "إجراءات مدنية", "استئناف قضائي"
+  ];
+  const gameDevCore = [
+    "roblox", "roblox studio", "game development", "game developer", "game design",
+    "game mechanics", "video game", "mobile game development", "unity game", "unreal engine",
+    "lua scripting", "gameplay systems", "تطوير العاب", "تطوير لعبة", "تصميم العاب",
+    "برمجة العاب", "لعبة روبلوكس"
+  ];
+  if (titleHas(legalCore) || titleHas(gameDevCore)) return null;
+  // If the title is clearly in a specialist domain, incidental mentions of office,
+  // marketing, analytics or writing in the body should not pull it into this channel.
+  if (allHas(gameDevCore) && (allHas(["lua", "scripting", "inventory system", "vehicle simulator", "game testing", "3d modelling", "3d modeling"]))) return null;
+
   const strongTitle = titleHas(DATA_ANALYSIS_STRONG);
   const strongBody = bodyHas(DATA_ANALYSIS_STRONG);
   const analysisContext = allHas(ANALYSIS_CONTEXT);
@@ -1276,7 +1298,25 @@ function classifyChannelProject(project) {
   };
   for (const category of GENERAL_CATEGORIES) {
     if (category.key === "ecommerce_listing") continue;
-    if (allHas(category.phrases)) return {
+    if (!allHas(category.phrases)) continue;
+    // Social media is a category only when the job is actually asking for this
+    // service, not when the client merely mentions their own marketing/community.
+    if (category.key === "social_media") {
+      const explicitSocialTitle = titleHas([
+        "social media", "social media manager", "social media management", "social media marketing",
+        "instagram management", "facebook page management", "increase followers", "increase engagement",
+        "سوشيال ميديا", "ادارة حسابات", "ادارة صفحات", "زيادة التفاعل", "زيادة المتابعين",
+        "تفاعل على فيسبوك", "تفاعل على انستجرام", "ادارة صفحة فيسبوك"
+      ]);
+      const explicitSocialBrief = bodyHas([
+        "manage social media", "manage our social media", "manage instagram", "manage facebook page",
+        "social media posts", "social media campaign", "increase followers", "increase engagement",
+        "سوشيال ميديا", "ادارة حسابات التواصل", "ادارة صفحات", "زيادة التفاعل", "زيادة المتابعين",
+        "نشر بوستات", "تفاعل على السوشيال ميديا"
+      ]);
+      if (!explicitSocialTitle && !explicitSocialBrief) continue;
+    }
+    return {
       key:category.key, label:CHANNEL_CATEGORY_LABELS[category.key],
       reason:`general-category:${category.key}`, group:"general_tasks"
     };
@@ -1285,8 +1325,13 @@ function classifyChannelProject(project) {
   return null;
 }
 function formatChannelMessage(site, project, category) {
-  const lines = formatMessage(site, project).split("\n");
-  // Place the category clearly near the top, immediately after the source line.
+  // The source site's category can be inaccurate (e.g. a social-media project
+  // mislabeled as Arabic content). Remove it and show only our content-based
+  // classifier's category in the dedicated channel.
+  const lines = formatMessage(site, project).split("\n").filter((line) =>
+    !/^\s*🗂\s*(?:<b>)?المجال(?:<\/b>)?\s*[:：]/i.test(line)
+  );
+  // Place the corrected category near the top, immediately after the source line.
   lines.splice(Math.min(2, lines.length), 0, `🗂 <b>المجال:</b> ${esc(category.label)}`);
   return lines.join("\n");
 }
