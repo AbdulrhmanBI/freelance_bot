@@ -249,9 +249,24 @@ function normalizeUnixSeconds(value) {
   return numeric > 0 ? numeric : null;
 }
 
-// Nafezly blocks requests from this Worker with HTTP 403.
-// Its public Telegram channel publishes project title, description, budget, and project link,
-// so use that public feed instead of repeatedly requesting the blocked listing page.
+// Nafezly has publicly indexed project pages on nafzly.com (without the extra "e").
+// Telegram posts may still contain links on nafezly.com, so normalize known aliases
+// to the current public host first, then retry the original host if needed.
+function normalizeNafezlyProjectUrl(rawUrl) {
+  try {
+    const url = new URL(rawUrl);
+    const host = url.hostname.toLowerCase();
+    if (["nafezly.com", "www.nafezly.com", "nafzly.com", "www.nafzly.com"].includes(host)) {
+      url.protocol = "https:";
+      url.hostname = "nafzly.com";
+      url.port = "";
+    }
+    return url.href;
+  } catch {
+    return String(rawUrl || "");
+  }
+}
+
 const nafezlyTelegram = {
   key: "nafezly",
   name: "نفذلي",
@@ -271,51 +286,68 @@ const nafezlyTelegram = {
     if (!items.length) throw new Error("Nafezly Telegram feed loaded but no project posts could be parsed");
     return items;
   },
-  // The public channel post often contains only a shortened preview ending in "...".
-  // When a fresh project is being processed, fetch its actual project page and prefer
-  // the full description. If Nafezly blocks the detail request, safely fall back to the
-  // channel excerpt and log the reason so it is visible in Cloudflare Observability.
   async detail(item) {
-    const feedItem = { ...item };
-    try {
-      const response = await fetch(item.url, {
-        headers: {
-          ...HEADERS,
-          Accept: "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-          Referer: "https://nafezly.com/projects",
-        },
-        redirect: "follow",
-      });
-      if (!response.ok) {
-        console.warn(`[nafezly] project detail HTTP ${response.status} for #${item.id}; using Telegram excerpt (${(feedItem.description || "").length} chars)`);
-        return feedItem;
-      }
+    const feedItem = { ...item, url: normalizeNafezlyProjectUrl(item.url) };
+    const originalUrl = String(item.url || "");
+    const candidates = [...new Set([feedItem.url, originalUrl].filter(Boolean))];
+    const feedDescription = cleanText(feedItem.description || "");
+    let lastReason = "no page attempt succeeded";
 
-      const html = await response.text();
-      if (looksLikeChallenge(html)) {
-        console.warn(`[nafezly] project detail returned a challenge for #${item.id}; using Telegram excerpt`);
-        return feedItem;
-      }
+    for (const candidateUrl of candidates) {
+      try {
+        const response = await fetch(candidateUrl, {
+          headers: {
+            ...HEADERS,
+            Accept: "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+            Referer: "https://nafzly.com/projects",
+          },
+          redirect: "follow",
+        });
+        const host = (() => { try { return new URL(candidateUrl).hostname; } catch { return "unknown"; } })();
+        console.log(`[nafezly] detail fetch id=${item.id}; host=${host}; status=${response.status}`);
+        if (!response.ok) {
+          lastReason = `HTTP ${response.status} on ${host}`;
+          continue;
+        }
 
-      const pageItem = parseHtmlProject("nafezly", html, item);
-      const feedDescription = cleanText(feedItem.description || "");
-      const pageDescription = cleanText(pageItem.description || "");
-      const usePageDescription = pageDescription.length > feedDescription.length;
-      const result = {
-        ...feedItem,
-        ...pageItem,
-        title: isUsefulDescription(pageItem.title || "", "") ? pageItem.title : feedItem.title,
-        description: usePageDescription ? pageDescription : feedDescription,
-        budget: pageItem.budget || feedItem.budget || "",
-        skills: pageItem.skills?.length ? pageItem.skills : (feedItem.skills || []),
-        extra: pageItem.extra?.length ? pageItem.extra : (feedItem.extra || []),
-      };
-      console.log(`[nafezly] detail source=${usePageDescription ? "project-page" : "telegram-feed"}; id=${item.id}; pageDescriptionChars=${pageDescription.length}; feedDescriptionChars=${feedDescription.length}; sentDescriptionChars=${result.description.length}`);
-      return result;
-    } catch (error) {
-      console.warn(`[nafezly] project detail fetch failed for #${item.id}: ${String(error)}; using Telegram excerpt (${(feedItem.description || "").length} chars)`);
-      return feedItem;
+        const html = await response.text();
+        if (looksLikeChallenge(html) || /javascript\s+is\s+disabled|enable\s+javascript/i.test(html.slice(0, 30000))) {
+          lastReason = `challenge/JavaScript placeholder on ${host}`;
+          console.warn(`[nafezly] detail page was a challenge/JS placeholder for #${item.id} on ${host}; trying alternate host if available`);
+          continue;
+        }
+
+        const pageItem = parseHtmlProject("nafezly", html, { ...item, url: candidateUrl });
+        const pageDescription = cleanText(pageItem.description || "");
+        const titleIsUseful = pageItem.title && !isGenericTitle(pageItem.title, "nafezly") && !/^javascript is disabled$/i.test(pageItem.title.trim());
+        const pageHasUsefulData = titleIsUseful || isUsefulDescription(pageDescription, pageItem.title || feedItem.title);
+        if (!pageHasUsefulData) {
+          lastReason = `page parsed but no useful project content on ${host}`;
+          console.warn(`[nafezly] detail parse yielded no useful content for #${item.id} on ${host}; trying alternate host if available`);
+          continue;
+        }
+
+        const usePageDescription = pageDescription.length > feedDescription.length;
+        const result = {
+          ...feedItem,
+          ...pageItem,
+          url: feedItem.url,
+          title: titleIsUseful ? pageItem.title : feedItem.title,
+          description: usePageDescription ? pageDescription : feedDescription,
+          budget: pageItem.budget || feedItem.budget || "",
+          skills: pageItem.skills?.length ? pageItem.skills : (feedItem.skills || []),
+          extra: pageItem.extra?.length ? pageItem.extra : (feedItem.extra || []),
+        };
+        console.log(`[nafezly] detail source=${usePageDescription ? "project-page" : (pageDescription ? "page-title+feed-description" : "telegram-feed")}; id=${item.id}; host=${host}; pageDescriptionChars=${pageDescription.length}; feedDescriptionChars=${feedDescription.length}; sentDescriptionChars=${result.description.length}`);
+        return result;
+      } catch (error) {
+        lastReason = String(error);
+        console.warn(`[nafezly] detail fetch failed id=${item.id}; url=${candidateUrl}; error=${lastReason}`);
+      }
     }
+
+    console.warn(`[nafezly] full detail unavailable for #${item.id}; reason=${lastReason}; using Telegram excerpt (${feedDescription.length} chars)`);
+    return feedItem;
   },
 };
 
@@ -330,7 +362,7 @@ function parseNafezlyTelegramFeed(html) {
     const end = index + 1 < wrappers.length ? wrappers[index + 1].index : source.length;
     const block = source.slice(start, end);
 
-    const urlMatch = block.match(/href=["'](https?:\/\/(?:www\.)?nafezly\.com\/project\/(\d+)(?:-[^"'?#\s<>]*)?(?:\?[^"']*)?)["']/i);
+    const urlMatch = block.match(/href=["'](https?:\/\/(?:www\.)?(?:nafezly|nafzly)\.com\/project\/(\d+)(?:-[^"'?#\s<>]*)?(?:\?[^"']*)?)["']/i);
     if (!urlMatch) continue;
 
     const bodyMatch = block.match(/<div\b[^>]*class=["'][^"']*\btgme_widget_message_text\b[^"']*["'][^>]*>([\s\S]*?)<\/div>/i);
@@ -348,7 +380,7 @@ function parseNafezlyTelegramFeed(html) {
     description = normalizeDescription(description, title);
     budget = cleanText(budget).replace(/^[:：-]\s*/, "");
 
-    const url = new URL(urlMatch[1]).href;
+    const url = normalizeNafezlyProjectUrl(urlMatch[1]);
     if (!title) title = titleFromUrl(url) || `مشروع جديد #${id}`;
 
     const item = {
