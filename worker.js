@@ -42,6 +42,16 @@ const SCHEMA = [
    )`,
   "CREATE TABLE IF NOT EXISTS messages (key TEXT PRIMARY KEY, text TEXT NOT NULL, created_at INTEGER NOT NULL)",
   "CREATE TABLE IF NOT EXISTS outbox (id INTEGER PRIMARY KEY AUTOINCREMENT, chat_id INTEGER NOT NULL, msg_key TEXT NOT NULL)",
+  `CREATE TABLE IF NOT EXISTS channel_outbox (
+     id INTEGER PRIMARY KEY AUTOINCREMENT,
+     channel_id TEXT NOT NULL,
+     msg_key TEXT NOT NULL,
+     text TEXT NOT NULL,
+     created_at INTEGER NOT NULL,
+     attempts INTEGER NOT NULL DEFAULT 0,
+     UNIQUE(channel_id, msg_key)
+   )`,
+  "CREATE INDEX IF NOT EXISTS idx_channel_outbox_id ON channel_outbox(id)",
   "CREATE TABLE IF NOT EXISTS user_input_state (chat_id INTEGER PRIMARY KEY, action TEXT NOT NULL, updated_at INTEGER NOT NULL)",
   "CREATE TABLE IF NOT EXISTS bot_settings (key TEXT PRIMARY KEY, value TEXT NOT NULL, updated_at INTEGER NOT NULL)",
   "CREATE INDEX IF NOT EXISTS idx_outbox_chat ON outbox(chat_id)",
@@ -1127,16 +1137,175 @@ function extractSkills(plain) {
 }
 
 // ---------------------------------------------------------------------
-// Cron: fetch new projects -> enqueue once -> send outbox batch
+// Category-channel classifier
+// The specialized channel accepts two types of jobs:
+// 1) Real data analysis / BI work.
+// 2) General execution tasks (PDF, PowerPoint, CV, generic Excel, data entry,
+//    simple document work and social-media services).
+// Python or SQL alone is NOT enough to classify a job as data analysis.
+// ---------------------------------------------------------------------
+const CHANNEL_CATEGORY_LABELS = {
+  data_analysis: "تحليل بيانات وذكاء أعمال",
+  excel_office: "Excel وجداول ومهام مكتبية",
+  pdf_documents: "PDF وتحويل وتنسيق ملفات",
+  presentations: "PowerPoint وعروض تقديمية",
+  cv_resume: "CV وسيرة ذاتية وملفات التقديم",
+  data_entry: "إدخال بيانات ونسخ وكتابة",
+  transcription_subtitles: "تفريغ صوتي وترجمة مرئية",
+  voiceover_audio: "تعليق صوتي وتسجيل ودوبلاج",
+  translation: "ترجمة وتعريب",
+  arabic_content: "كتابة محتوى باللغة العربية",
+  proofreading: "تدقيق لغوي ومراجعة نصوص",
+  social_media: "سوشيال ميديا وتفاعل وإدارة حسابات",
+  research_assistant: "بحث على الإنترنت ومساعد افتراضي",
+  ecommerce_listing: "إدخال منتجات ومتاجر إلكترونية",
+  basic_design: "تصميمات بسيطة وتعديل صور وقوالب",
+  video_audio: "مونتاج فيديو وتعديل صوت",
+  customer_support: "خدمة عملاء ومتابعة ورسائل",
+  forms_surveys: "نماذج واستبيانات وتجميع معلومات",
+};
+
+function normalizeCategoryText(value) {
+  return String(value || "").normalize("NFKC").toLocaleLowerCase("en")
+    .replace(/[\u064B-\u065F\u0670\u0640]/g, "").replace(/[أإآٱ]/g, "ا")
+    .replace(/ى/g, "ي").replace(/ة/g, "ه").replace(/[^\p{L}\p{N}]+/gu, " ")
+    .replace(/\s+/g, " ").trim();
+}
+
+// Whole-phrase matching in normalized English and Arabic, to avoid accidental
+// matches on tiny fragments such as "sql" inside unrelated words.
+function categoryHasAny(text, phrases) {
+  if (!text) return false;
+  const padded = ` ${text} `;
+  return phrases.some((phrase) => {
+    const normalized = normalizeCategoryText(phrase);
+    return normalized && padded.includes(` ${normalized} `);
+  });
+}
+
+const DATA_ANALYSIS_STRONG = [
+  "data analysis", "data analyst", "data analytics", "business intelligence", "bi analyst",
+  "bi reporting", "business analytics", "data science", "data visualization", "data visualisation",
+  "power bi", "powerbi", "tableau", "looker studio", "qlik sense", "qlikview", "metabase",
+  "apache superset", "dax", "power query", "power pivot", "data warehouse", "data warehousing",
+  "data pipeline", "etl pipeline", "data modeling", "data modelling", "data mart", "olap cube",
+  "data dashboard", "analytics dashboard", "sales dashboard", "financial dashboard", "executive dashboard",
+  "interactive dashboard", "kpi dashboard", "dashboard development", "dashboard creation",
+  "data reporting", "sales analytics", "financial analytics", "customer analytics", "marketing analytics",
+  "retail analytics", "data cleaning", "data cleansing", "data wrangling", "exploratory data analysis",
+  "statistical analysis", "predictive analytics", "forecasting model", "time series analysis",
+  "customer segmentation", "cohort analysis", "ab testing analysis", "تحليل البيانات", "تحليل بيانات",
+  "تحليل الداتا", "محلل بيانات", "محلل البيانات", "محلله بيانات", "تحليلات البيانات", "علم البيانات",
+  "ذكاء الاعمال", "تحليل احصائي", "تحليل المبيعات", "تحليل مالي", "تحليل الاداء", "تحليل العملاء",
+  "تحليل التسويق", "تحليل بيانات العملاء", "تحليل بيانات المبيعات", "تحليل بيانات مالية",
+  "تنظيف البيانات", "تنظيف الداتا", "تصور البيانات", "تصوير البيانات", "لوحة مؤشرات", "لوحات معلومات",
+  "لوحة معلومات", "لوحة تحكم تحليلية", "لوحات تحكم تحليلية", "داشبورد", "داش بورد", "داشبورد تفاعلية",
+  "لوحة بيانات تفاعلية", "مؤشرات الاداء", "تقارير ذكاء الاعمال", "تقارير البيانات", "تقارير تحليلية",
+  "تقرير تحليلي", "تقرير مبيعات", "تقارير المبيعات", "التنبؤ بالمبيعات", "التنبؤ بالطلب",
+  "تحليل الاتجاهات", "تحليل السلاسل الزمنية", "تحليل الاستبيانات", "تحليل احصائيات",
+];
+const ANALYSIS_CONTEXT = [
+  "analysis", "analytics", "analytical", "reporting", "data report", "dashboard", "dashboards",
+  "kpi", "kpis", "metrics", "business metrics", "visualization", "visualisation", "forecasting",
+  "statistics", "dataset", "datasets", "data cleaning", "data model", "data insights", "sales analysis",
+  "financial analysis", "customer analysis", "performance analysis", "data quality", "trend analysis",
+  "تحليل", "تحليلات", "تقارير", "تقرير", "لوحات معلومات", "لوحة معلومات", "لوحات تحكم", "داشبورد",
+  "مؤشرات الاداء", "احصائيات", "تنظيف البيانات", "تحليل المبيعات", "تحليل مالي", "تحليل العملاء",
+  "التنبؤ", "البيانات التاريخية", "استخراج المؤشرات", "استخراج الرؤى", "عرض النتائج", "تصور البيانات",
+];
+const BROAD_DATA_TOOLS = [
+  "excel", "microsoft excel", "ms excel", "google sheets", "spreadsheet", "spreadsheets", "sql",
+  "mysql", "postgresql", "postgres", "python", "pandas", "numpy", "r programming", "jupyter",
+  "jupyter notebook", "power query", "power pivot", "pivot table", "pivot tables", "csv", "dataframe",
+  "data frame", "اكسل", "اكسيل", "جداول البيانات", "مايكروسوفت اكسل", "جوجل شيتس", "بايثون", "اس كيو ال",
+];
+const REPORT_SIGNALS = [
+  "dashboard", "dashboards", "kpi", "kpis", "business metrics", "data report", "sales report",
+  "financial report", "data visualization", "forecasting", "data cleaning", "pivot table analysis",
+  "لوحات معلومات", "لوحة معلومات", "لوحات تحكم", "داشبورد", "مؤشرات الاداء", "تقرير تحليلي",
+  "تقارير تحليلية", "تحليل المبيعات", "تقارير المبيعات",
+];
+
+const GENERAL_CATEGORIES = [
+ { key:"transcription_subtitles", phrases:["transcription","audio transcription","video transcription","transcribe audio","transcribe video","speech to text","audio to text","voice to text","arabic transcription","english transcription","meeting transcription","interview transcription","lecture transcription","podcast transcription","verbatim transcription","subtitles","subtitle creation","subtitle editing","captions","closed captions","srt subtitles","srt file","vtt captions","captioning","transcript writing","تفريغ صوتي","تفريغ فيديو","تفريغ محاضرات","تفريغ مقابلات","تفريغ اجتماع","تفريغ تسجيلات","تحويل الصوت الى نص","تحويل الصوت لنص","تحويل الكلام الى نص","كتابة الكلام المسموع","تفريغ عربي","تفريغ انجليزي","اضافة ترجمة للفيديو","ترجمة مرئية","ملف srt","تفريغ بودكاست"]},
+ { key:"voiceover_audio", phrases:["voiceover","voice over","voice-over","voice over artist","voice actor","voice acting","voice talent","voice recording","voice narration","narration","audio narration","arabic voice over","arabic voiceover","english voiceover","female voiceover","male voiceover","commercial voice over","ivr recording","audiobook narration","dubbing","voice dub","تعليق صوتي","التعليق الصوتي","معلق صوتي","معلقة صوتية","معلق صوتي عربي","تعليق صوتي عربي","تعليق صوتي انجليزي","تسجيل صوتي","تسجيل اعلان صوتي","تسجيل إعلاني","تسجيل فويس اوفر","فويس اوفر","فويس أوفر","دوبلاج","اداء صوتي","أداء صوتي","تسجيل كتب صوتية","تعليق للفيديو","قراءة نص صوتيا"]},
+ { key:"translation", phrases:["translation","translate","translator","translating","translation services","arabic translation","english arabic translation","arabic english translation","translate to arabic","translate to english","localization","localisation","website translation","document translation","subtitle translation","ترجمة","مترجم","ترجمة عربية","ترجمة انجليزي","ترجمة من العربية","ترجمة من الانجليزية","ترجمة من الانجليزي للعربي","ترجمة من العربي للانجليزي","ترجمة ملفات","ترجمة مستندات","ترجمة فيديو","تعريب","تعريب محتوى","تعريب موقع","ترجمة نصوص","ترجمة مقالات"]},
+ { key:"arabic_content", phrases:["arabic writing","arabic content","arabic copywriting","content writing","copywriting","article writing","blog writing","blog post","product description writing","product descriptions","script writing","social media captions","ad copy","writing in arabic","arabic writer","seo content writing","website content","creative writing","content creation","كتابة باللغة العربية","الكتابة باللغة العربية","كتابة محتوى","محتوى عربي","كتابة محتوى عربي","كاتب محتوى","كتابة مقالات","كتابة مقال","كتابة تدوينات","كتابة بوستات","كتابة منشورات","كتابة اعلانات","صياغة اعلانية","كتابة وصف منتجات","وصف المنتجات","كتابة محتوى تسويقي","كتابة سكريبت","كتابة نصوص اعلانية","صياغة المحتوى","كتابة محتوى لموقع","كتابة محتوى للسوشيال ميديا","كتابة محتوى متوافق مع السيو"]},
+ { key:"proofreading", phrases:["proofreading","proofreader","proofread","copy editing","copy edit","grammar check","spell check","spelling correction","text editing","editing arabic text","arabic proofreading","language review","formatting text","diacritics","arabic diacritics","تدقيق لغوي","تدقيق املائي","مراجعة لغوية","مراجعة النصوص","مراجعة نص","تصحيح لغوي","تصحيح املائي","تصحيح الاخطاء","ضبط التشكيل","تشكيل النص","تشكيل الكلمات","اضافة التشكيل","تنسيق النصوص","تحرير نصوص","مراجعة وتحرير"]},
+ { key:"presentations", phrases:["powerpoint","power point","ppt","pptx","presentation","presentations","slide deck","slides","google slides","keynote presentation","pitch deck","presentation design","presentation formatting","academic presentation","business presentation","make a presentation","عروض تقديمية","عرض تقديمي","عرض بوربوينت","باوربوينت","باور بوينت","بوربوينت","عمل برزنتيشن","تصميم برزنتيشن","تصميم عرض تقديمي","اعداد عرض تقديمي","شرائح عرض","تنسيق شرائح","تجهيز شرائح","عرض جامعي","عرض اكاديمي","عرض تفاعلي","تحويل pdf الى powerpoint"]},
+ { key:"cv_resume", phrases:["cv","resume","curriculum vitae","resume writing","cv writing","cv design","resume design","linkedin profile","cover letter","personal statement","job application documents","سيرة ذاتية","السيرة الذاتية","كتابة cv","تصميم cv","تنسيق cv","سي في","سى في","عمل cv","اعداد سيرة ذاتية","تطوير السيرة الذاتية","تحسين cv","تحسين لينكد ان","بروفايل لينكد ان","رسالة تغطية","خطاب تقديم","خطاب تعريفي","ملف تقديم وظيفي","سيرة ذاتية ats","cv ats","resume ats"]},
+ { key:"pdf_documents", phrases:["pdf","edit pdf","pdf editing","pdf conversion","convert pdf","pdf to word","word to pdf","merge pdf","split pdf","compress pdf","reduce pdf size","scan to pdf","image to pdf","pdf to image","ocr","document formatting","format document","word document","ms word","microsoft word","docx","doc file","file conversion","convert files","document conversion","formatting documents","scan documents","fillable pdf","pdf form","تعديل pdf","تعديل ملف pdf","تعديل ملفات pdf","تحويل pdf","تحويل ملفات pdf","تحويل pdf الى word","تحويل وورد الى pdf","دمج pdf","دمج ملفات pdf","تقسيم pdf","ضغط pdf","تقليل حجم pdf","صور الى pdf","تحويل الصور الى pdf","مسح ضوئي","استخراج نص من pdf","استخراج النص من الصور","تنسيق ملف word","تنسيق ملف وورد","تنسيق ملفات word","تنسيق مستندات","تنسيق مستند","تحويل الملفات","تعبئة pdf","ملء نموذج pdf","تعديل ملفات وورد"]},
+ { key:"data_entry", phrases:["data entry","data-entry","data input","data collection","copy typing","typing job","typing","database entry","data annotation","data labeling","data labelling","tagging data","web scraping data","lead list building","copy paste","copy and paste","manual data entry","product data entry","form filling","ادخال بيانات","ادخال البيانات","مدخل بيانات","تفريغ بيانات","نقل بيانات","نسخ ولصق","نسخ بيانات","كتابة بيانات","كتابة من صور","تحويل الصور الى نص","تحويل صورة الى نص","ادخال بيانات excel","ادخال بيانات على اكسل","تجميع بيانات","جمع بيانات","تصنيف بيانات يدويا","وسم البيانات","تعليم البيانات","تعبئة نماذج","ملء استمارات","ادخال استبيانات","تفريغ جداول"]},
+ { key:"excel_office", phrases:["excel","microsoft excel","ms excel","google sheets","spreadsheet","spreadsheets","excel formatting","excel formulas","excel function","excel functions","excel template","excel spreadsheet","excel workbook","excel file","google sheet","worksheet formatting","conditional formatting","simple excel formulas","basic excel","data formatting","اكسل","اكسيل","جداول البيانات","جداول اكسل","ملف اكسل","ملف excel","تنسيق اكسل","تنسيق اكسيل","معادلات اكسل","معادلات excel","دوال اكسل","دوال excel","تنسيق جدول","تنسيق جداول","تنسيق شيت","جوجل شيتس","جوجل شيت","تنسيق جداول بيانات","عمل جدول اكسل","انشاء جدول اكسل","تعديل ملف اكسل","تعديل ملف excel"]},
+ { key:"social_media", phrases:["social media management","social media manager","social media marketing","social media engagement","social engagement","engagement campaign","increase engagement","increase followers","likes and comments","instagram engagement","facebook engagement","tiktok engagement","youtube engagement","followers","likes","comments","shares","post scheduling","community management","manage instagram account","manage facebook page","manage tiktok account","social media posting","content calendar","سوشيال ميديا","وسائل التواصل الاجتماعي","ادارة حسابات التواصل","ادارة صفحات","ادارة صفحة فيسبوك","ادارة انستجرام","زيادة التفاعل","زيادة تفاعل","زيادة المتابعين","زيادة اللايكات","زيادة الاعجابات","لايكات","اعجابات","تعليقات","متابعين","تفاعل على فيسبوك","تفاعل على انستجرام","تفاعل على تيك توك","تفاعل على السوشيال ميديا","نشر بوستات","جدولة منشورات","ادارة محتوى السوشيال","نشر محتوى","تفاعل انستجرام","تفاعل تيك توك","تفاعل يوتيوب","تسويق عبر السوشيال ميديا"]},
+ { key:"research_assistant", phrases:["virtual assistant","virtual assistance","va services","administrative assistant","admin support","web research","internet research","online research","internet search","online search","internet data collection","research assistant","email management","calendar management","appointment scheduling","lead generation","lead research","email list building","list building","market research assistant","organize files","file organization","مساعد افتراضي","مساعدة افتراضية","مساعد اداري","بحث على الانترنت","بحث عبر الانترنت","بحث اونلاين","تجميع معلومات","جمع معلومات من الانترنت","بحث وجمع بيانات","البحث عبر الويب","ادارة البريد الالكتروني","تنظيم البريد","تنظيم ملفات","تنظيم مواعيد","جدولة مواعيد","دعم اداري","مساعدة ادارية","توليد عملاء محتملين","تجميع ايميلات","تجميع عناوين بريد"]},
+ { key:"ecommerce_listing", phrases:["product listing","product upload","upload products","product catalog entry","product data entry","shopify product listing","shopify product upload","woocommerce product upload","woocommerce product listing","amazon product listing","ecommerce product upload","e-commerce product upload","catalog upload","store product entry","upload products to shopify","inventory listing","ادخال منتجات","رفع منتجات","اضافة منتجات للمتجر","رفع منتجات للمتجر","ادخال منتجات المتجر","رفع المنتجات","اضافة منتجات","ادخال كتالوج","اضافة منتجات شوبيفاي","رفع منتجات شوبيفاي","اضافة منتجات ووكومرس","رفع منتجات ووكومرس","ادخال بيانات المنتجات"]},
+ { key:"basic_design", phrases:["canva template","edit canva template","remove background","background removal","image resizing","resize images","image editing","simple photo editing","thumbnail design","youtube thumbnail","social media post design","instagram post design","simple banner design","presentation template","edit template","photo retouching","كانفا","تصميم كانفا","تعديل قالب","تعديل قوالب","تعديل صور","تعديل صورة","قص الصور","قص صورة","ازالة الخلفية","حذف الخلفية","تغيير مقاس الصور","تغيير حجم الصور","تصميم صورة مصغرة","تصميم ثامبنيل","تصميم غلاف يوتيوب","تصميم منشورات السوشيال","تصميم بوست","تعديل قالب جاهز","تصميم بانر بسيط","تحسين جودة الصور","تعديل مقاسات الصور"]},
+ { key:"video_audio", phrases:["video editing","edit video","video editor","short video editing","reels editing","youtube shorts","tiktok video editing","cut video","trim video","merge video clips","podcast editing","audio editing","audio cleanup","noise removal audio","remove background noise","مونتاج فيديو","تعديل فيديو","تعديل مقاطع فيديو","قص فيديو","دمج مقاطع فيديو","مونتاج ريلز","مونتاج تيك توك","تعديل فيديو يوتيوب","مونتاج شورتس","تعديل صوت","تنقية الصوت","ازالة الضوضاء","تحسين جودة الصوت","تعديل بودكاست","مونتاج بودكاست"]},
+ { key:"customer_support", phrases:["customer support","customer service","chat support","email support","answer customer messages","respond to customers","customer care","support agent","live chat agent","order follow up","خدمة عملاء","دعم العملاء","الرد على العملاء","الرد على رسائل العملاء","متابعة العملاء","متابعة الطلبات","خدمة العملاء عبر الشات","خدمة عملاء عن بعد","الرد على الاستفسارات","استقبال مكالمات","متابعة رسائل"]},
+ { key:"forms_surveys", phrases:["survey data collection","online survey","survey creation","google forms","microsoft forms","form creation","data collection form","questionnaire formatting","questionnaire creation","استبيان","استبيانات","عمل استبيان","تصميم استبيان","انشاء استبيان","تجميع نتائج الاستبيان","جمع بيانات استبيان","نماذج جوجل","جوجل فورمز","انشاء نموذج","انشاء فورم","تصميم نموذج الكتروني"]},
+];
+
+function classifyChannelProject(project) {
+  const title = normalizeCategoryText(project?.title || "");
+  const description = normalizeCategoryText(project?.description || "");
+  const skills = normalizeCategoryText((project?.skills || []).join(" "));
+  const all = `${title} ${description} ${skills}`.trim();
+  if (!all) return null;
+  const titleHas = (phrases) => categoryHasAny(title, phrases);
+  const allHas = (phrases) => categoryHasAny(all, phrases);
+  const bodyHas = (phrases) => categoryHasAny(`${description} ${skills}`.trim(), phrases);
+  const strongTitle = titleHas(DATA_ANALYSIS_STRONG);
+  const strongBody = bodyHas(DATA_ANALYSIS_STRONG);
+  const analysisContext = allHas(ANALYSIS_CONTEXT);
+  const broadTool = allHas(BROAD_DATA_TOOLS);
+  const reportSignal = allHas(REPORT_SIGNALS);
+  // Keep explicit BI/analysis terms first. Python, SQL and Excel alone are not enough.
+  if (strongTitle || strongBody || (analysisContext && broadTool) || (reportSignal && analysisContext)) {
+    const reason = strongTitle ? "strong-analysis-signal-in-title"
+      : strongBody ? "strong-analysis-signal-in-description-or-skills"
+      : analysisContext && broadTool ? "broad-data-tool-with-analysis-context"
+      : "report-or-dashboard-with-analysis-context";
+    return { key:"data_analysis", label:CHANNEL_CATEGORY_LABELS.data_analysis, reason, group:"data_analysis" };
+  }
+  // Prioritize product listing so projects that also mention Excel/data entry keep their specific ecommerce label.
+  const ecommerceCategory = GENERAL_CATEGORIES.find((category) => category.key === "ecommerce_listing");
+  if (ecommerceCategory && allHas(ecommerceCategory.phrases)) return {
+    key:ecommerceCategory.key, label:CHANNEL_CATEGORY_LABELS[ecommerceCategory.key],
+    reason:`general-category:${ecommerceCategory.key}`, group:"general_tasks"
+  };
+  for (const category of GENERAL_CATEGORIES) {
+    if (category.key === "ecommerce_listing") continue;
+    if (allHas(category.phrases)) return {
+      key:category.key, label:CHANNEL_CATEGORY_LABELS[category.key],
+      reason:`general-category:${category.key}`, group:"general_tasks"
+    };
+  }
+  // Generic Python/SQL/JS, unrelated development and unrelated design stay out.
+  return null;
+}
+function formatChannelMessage(site, project, category) {
+  const lines = formatMessage(site, project).split("\n");
+  // Place the category clearly near the top, immediately after the source line.
+  lines.splice(Math.min(2, lines.length), 0, `🗂 <b>المجال:</b> ${esc(category.label)}`);
+  return lines.join("\n");
+}
+
+// ---------------------------------------------------------------------
+// Cron: fetch new projects -> enqueue once -> send user and channel outboxes
 // ---------------------------------------------------------------------
 async function run(env) {
   const startedAt = Date.now();
-  const [state, users] = await withSchema(env, () => Promise.all([loadState(env), loadUsers(env)]));
+  // Idempotent CREATE IF NOT EXISTS statements also migrate existing D1 databases.
+  await env.DB.batch(SCHEMA.map((statement) => env.DB.prepare(statement)));
+  const [state, users] = await Promise.all([loadState(env), loadUsers(env)]);
   const stateUpdates = {};
   const pending = [];
+  const pendingChannel = [];
+  const channelId = String(env.JOBS_CHANNEL_ID || "").trim();
   let processed = 0;
 
-  console.log(`[run] started; activeUsers=${users.length}; sites=${SITES.length}`);
+  console.log(`[run] started; activeUsers=${users.length}; sites=${SITES.length}; categoryChannel=${channelId ? "configured" : "not-configured"}`);
   if (!users.length) console.warn("[run] no active users; discovered projects will be baselined without notifications");
 
   const listResults = await Promise.allSettled(SITES.map((site) => site.list()));
@@ -1196,11 +1365,14 @@ async function run(env) {
     }
 
     const audience = users.filter((user) => parseSites(user.sites).includes(site.key));
-    if (!audience.length) {
-      // Do not accumulate old jobs while nobody is subscribed to this site.
+    if (!audience.length && !channelId) {
+      // Preserve the old behavior when channel publishing has not been configured.
       stateUpdates[site.key] = newestId;
-      console.warn(`[${site.key}] no active subscribers selected this site; skipping ${fresh.length} new jobs and advancing to ${newestId}`);
+      console.warn(`[${site.key}] no active subscribers selected this site and no category channel is configured; skipping ${fresh.length} new jobs and advancing to ${newestId}`);
       continue;
+    }
+    if (!audience.length && channelId) {
+      console.log(`[${site.key}] no private subscribers; still checking new projects for the category channel`);
     }
 
     let lastProcessedId = burstSkippedUpTo;
@@ -1232,11 +1404,26 @@ async function run(env) {
 
       processed++;
       lastProcessedId = Number(item.id);
+      const messageKey = `${site.key}:${item.id}`;
       if (recipients.length) {
-        pending.push({ key: `${site.key}:${item.id}`, text: formatMessage(site, full), chatIds: recipients });
+        pending.push({ key: messageKey, text: formatMessage(site, full), chatIds: recipients });
         console.log(`[${site.key}] project=${item.id}; recipients=${recipients.length}; queued=true`);
       } else {
-        console.log(`[${site.key}] project=${item.id}; recipients=0; skipped_by_keyword_filter=true`);
+        console.log(`[${site.key}] project=${item.id}; recipients=0; skipped_by_keyword_filter_or_no_subscribers=true`);
+      }
+
+      if (channelId) {
+        const category = classifyChannelProject(full);
+        if (category) {
+          pendingChannel.push({
+            channelId,
+            key: messageKey,
+            text: formatChannelMessage(site, full, category),
+          });
+          console.log(`[category-channel] site=${site.key} project=${item.id} category=${category.key} reason=${category.reason} queued=true`);
+        } else {
+          console.log(`[category-channel] site=${site.key} project=${item.id} category=none reason=no-category-match`);
+        }
       }
     }
     if (lastProcessedId > lastId) stateUpdates[site.key] = lastProcessedId;
@@ -1244,12 +1431,13 @@ async function run(env) {
 
   const recipientCount = pending.reduce((sum, project) => sum + project.chatIds.length, 0);
   console.log(`[run] discovery complete; processed=${processed}; pendingProjects=${pending.length}; pendingRecipients=${recipientCount}; stateUpdates=${Object.keys(stateUpdates).length}`);
-  await enqueueAndSave(env, pending, stateUpdates);
+  await enqueueAndSave(env, pending, stateUpdates, pendingChannel);
   await flushOutbox(env);
+  if (channelId) await flushChannelOutbox(env);
   console.log(`[run] complete in ${Date.now() - startedAt}ms`);
 }
 
-async function enqueueAndSave(env, pending, stateUpdates) {
+async function enqueueAndSave(env, pending, stateUpdates, pendingChannel = []) {
   const now = Math.floor(Date.now() / 1000);
   const statements = [];
   for (const message of pending) {
@@ -1266,6 +1454,13 @@ async function enqueueAndSave(env, pending, stateUpdates) {
       ).bind(message.key, JSON.stringify(message.chatIds))
     );
   }
+  for (const channelMessage of pendingChannel) {
+    statements.push(
+      env.DB.prepare(
+        "INSERT OR IGNORE INTO channel_outbox (channel_id, msg_key, text, created_at) VALUES (?1, ?2, ?3, ?4)"
+      ).bind(channelMessage.channelId, channelMessage.key, channelMessage.text, now)
+    );
+  }
   for (const [site, id] of Object.entries(stateUpdates)) {
     statements.push(
       env.DB.prepare(
@@ -1275,7 +1470,45 @@ async function enqueueAndSave(env, pending, stateUpdates) {
     );
   }
   if (statements.length) await env.DB.batch(statements);
-  console.log(`[db] queuedProjects=${pending.length}; queuedRecipients=${pending.reduce((sum, project) => sum + project.chatIds.length, 0)}; stateUpdates=${Object.keys(stateUpdates).length}`);
+  console.log(`[db] queuedProjects=${pending.length}; queuedRecipients=${pending.reduce((sum, project) => sum + project.chatIds.length, 0)}; queuedChannelMessages=${pendingChannel.length}; stateUpdates=${Object.keys(stateUpdates).length}`);
+}
+
+async function flushChannelOutbox(env) {
+  const channelId = String(env.JOBS_CHANNEL_ID || "").trim();
+  if (!channelId) return;
+
+  const cutoff = Math.floor(Date.now() / 1000) - 3 * 3600;
+  const stale = await env.DB.prepare("DELETE FROM channel_outbox WHERE created_at < ?1").bind(cutoff).run();
+  if (Number(stale?.meta?.changes || 0)) console.warn(`[category-channel] removed stale queued messages=${stale.meta.changes}`);
+
+  const { results = [] } = await env.DB.prepare(
+    "SELECT id, channel_id, msg_key, text, attempts FROM channel_outbox ORDER BY id LIMIT 10"
+  ).all();
+  console.log(`[category-channel] rowsToProcess=${results.length}; channel=${channelId}`);
+  for (const row of results) {
+    try {
+      await sendMessage(env, row.channel_id, row.text);
+      await env.DB.prepare("DELETE FROM channel_outbox WHERE id = ?1").bind(row.id).run();
+      console.log(`[category-channel] sent id=${row.id} key=${row.msg_key}`);
+      await sleep(120);
+    } catch (error) {
+      if (error.status === 400) {
+        try {
+          await sendMessage(env, row.channel_id, toPlain(row.text), { parse_mode: undefined });
+          await env.DB.prepare("DELETE FROM channel_outbox WHERE id = ?1").bind(row.id).run();
+          console.log(`[category-channel] sent plain-text fallback id=${row.id} key=${row.msg_key}`);
+          await sleep(120);
+          continue;
+        } catch (fallbackError) {
+          error = fallbackError;
+        }
+      }
+      await env.DB.prepare("UPDATE channel_outbox SET attempts = attempts + 1 WHERE id = ?1").bind(row.id).run();
+      console.error(`[category-channel] send failed id=${row.id} key=${row.msg_key} attempt=${Number(row.attempts || 0) + 1} status=${error.status ?? "unknown"}: ${String(error)}`);
+      // Keep this row queued for retry; entries older than 3 hours are pruned above.
+      break;
+    }
+  }
 }
 
 async function flushOutbox(env) {
