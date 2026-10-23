@@ -12,7 +12,7 @@ const MAX_NEW_PER_RUN = 10;
 const SEND_BATCH = 30;
 const MAX_KEYWORDS = 20;
 const DEFAULT_SITES = "kafiil,mostaql,nafezly,khamsat,freelancer";
-const MAX_DESCRIPTION = 1800;
+const MAX_DESCRIPTION = 3200;
 // Freelancer: only deliver projects whose original submission timestamp is within 15 minutes.
 // The API query sorts by a supported field (time_updated); we still validate the original
 // submission time locally so an old project that was merely updated is never announced.
@@ -271,9 +271,51 @@ const nafezlyTelegram = {
     if (!items.length) throw new Error("Nafezly Telegram feed loaded but no project posts could be parsed");
     return items;
   },
-  // The channel message already contains project details, so don't request nafezly.com again.
+  // The public channel post often contains only a shortened preview ending in "...".
+  // When a fresh project is being processed, fetch its actual project page and prefer
+  // the full description. If Nafezly blocks the detail request, safely fall back to the
+  // channel excerpt and log the reason so it is visible in Cloudflare Observability.
   async detail(item) {
-    return item;
+    const feedItem = { ...item };
+    try {
+      const response = await fetch(item.url, {
+        headers: {
+          ...HEADERS,
+          Accept: "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+          Referer: "https://nafezly.com/projects",
+        },
+        redirect: "follow",
+      });
+      if (!response.ok) {
+        console.warn(`[nafezly] project detail HTTP ${response.status} for #${item.id}; using Telegram excerpt (${(feedItem.description || "").length} chars)`);
+        return feedItem;
+      }
+
+      const html = await response.text();
+      if (looksLikeChallenge(html)) {
+        console.warn(`[nafezly] project detail returned a challenge for #${item.id}; using Telegram excerpt`);
+        return feedItem;
+      }
+
+      const pageItem = parseHtmlProject("nafezly", html, item);
+      const feedDescription = cleanText(feedItem.description || "");
+      const pageDescription = cleanText(pageItem.description || "");
+      const usePageDescription = pageDescription.length > feedDescription.length;
+      const result = {
+        ...feedItem,
+        ...pageItem,
+        title: isUsefulDescription(pageItem.title || "", "") ? pageItem.title : feedItem.title,
+        description: usePageDescription ? pageDescription : feedDescription,
+        budget: pageItem.budget || feedItem.budget || "",
+        skills: pageItem.skills?.length ? pageItem.skills : (feedItem.skills || []),
+        extra: pageItem.extra?.length ? pageItem.extra : (feedItem.extra || []),
+      };
+      console.log(`[nafezly] detail source=${usePageDescription ? "project-page" : "telegram-feed"}; id=${item.id}; pageDescriptionChars=${pageDescription.length}; feedDescriptionChars=${feedDescription.length}; sentDescriptionChars=${result.description.length}`);
+      return result;
+    } catch (error) {
+      console.warn(`[nafezly] project detail fetch failed for #${item.id}: ${String(error)}; using Telegram excerpt (${(feedItem.description || "").length} chars)`);
+      return feedItem;
+    }
   },
 };
 
@@ -389,7 +431,12 @@ function parseHtmlProject(siteKey, html, item) {
   if (siteKey === "mostaql") {
     description = textAfterAnyLabel(plain, ["تفاصيل المشروع", "وصف المشروع"], ["حالة المشروع", "الميزانية", "مدة التنفيذ"]);
   } else if (siteKey === "nafezly") {
-    description = textAfterAnyLabel(plain, ["تفاصيل المشروع", "وصف المشروع", "قم بوصف المشروع"], ["الميزانية", "المدة المتوقعة", "عدد العروض", "حالة المشروع"]);
+    // Stop at the skills/action area so it does not accidentally absorb the bid list or footer.
+    description = textAfterAnyLabel(
+      plain,
+      ["تفاصيل المشروع", "وصف المشروع", "قم بوصف المشروع"],
+      ["مهارات مطلوبة", "المهارات المطلوبة", "الميزانية", "المدة المتوقعة", "عدد العروض", "حالة المشروع", "أضف عرضك الآن"]
+    );
   } else if (siteKey === "khamsat") {
     description = textAfterAnyLabel(plain, ["تفاصيل الطلب", "تفاصيل المشروع", "وصف الطلب"], ["آخر تفاعل", "تاريخ النشر", "صاحب الطلب", "الميزانية"]);
   }
@@ -1089,6 +1136,7 @@ async function handleUpdate(env, update) {
 
   if (command === "/cancel") {
     await clearPendingInput(env, chatId);
+    await deleteBotSetting(env, `keyword_draft:${chatId}`);
     if (pending?.action?.startsWith("welcome_")) {
       const blocks = await getWelcomeContent(env);
       return sendMessage(env, chatId, "Cancelled. No pending welcome-content changes were saved.", {
@@ -1150,24 +1198,44 @@ async function handleUpdate(env, update) {
 
   if (!text) return;
 
-  // The clear-filter action is intentionally distinct from /cancel:
-  // clear removes the filter and saves that choice; /cancel changes nothing.
+  // Keyword edits are staged first. The Cancel button is shown only after the
+  // user has submitted a draft; existing settings remain unchanged until Save.
   if (!text.startsWith("/") && pending?.action === "keywords") {
-    const lowered = text.toLocaleLowerCase();
-    if (/^(clear|مسح)$/i.test(lowered)) {
-      await env.DB.prepare("UPDATE users SET keywords = '' WHERE chat_id = ?1").bind(chatId).run();
-      await clearPendingInput(env, chatId);
-      const user = await getOrCreateUser(env, chatId);
-      return sendMessage(env, chatId, "تم مسح فلتر الكلمات. هتوصلك كل المشاريع من المنصات المفعّلة. لو كنت تقصد إلغاء العملية بدون تغيير، استخدم /cancel.", { reply_markup: settingsKeyboard(user) });
-    }
     const list = [...new Set(
       text.split(/[,،\n]/).map((value) => value.trim().toLocaleLowerCase().slice(0, 30)).filter(Boolean)
     )].slice(0, MAX_KEYWORDS);
-    if (!list.length) return sendMessage(env, chatId, "ابعت كلمة واحدة على الأقل مفصولة بفواصل، أو استخدم /cancel للإلغاء بدون تغيير.");
-    await env.DB.prepare("UPDATE users SET keywords = ?1 WHERE chat_id = ?2").bind(list.join(","), chatId).run();
+    if (!list.length) {
+      return sendMessage(env, chatId, "ابعت كلمة واحدة على الأقل مفصولة بفواصل، مثال: Python, Excel, تصميم. لإلغاء العملية استخدم /cancel.");
+    }
+    await setBotSetting(env, `keyword_draft:${chatId}`, JSON.stringify(list));
+    await setPendingInput(env, chatId, "keywords_confirm");
+    return sendMessage(
+      env,
+      chatId,
+      `<b>مراجعة الكلمات المفتاحية</b>\n\n${esc(list.join("، "))}\n\nاحفظ الكلمات الجديدة أم عدّلها؟`,
+      { reply_markup: keywordDraftKeyboard() }
+    );
+  }
+
+  // Ignore additional free text while a draft is waiting for Save/Cancel.
+  if (!text.startsWith("/") && pending?.action === "keywords_confirm") {
+    let draft = [];
+    try {
+      draft = JSON.parse((await getBotSetting(env, `keyword_draft:${chatId}`)) || "[]");
+    } catch { draft = []; }
+    return sendMessage(
+      env,
+      chatId,
+      `<b>لديك كلمات بانتظار التأكيد:</b>\n${esc(Array.isArray(draft) ? draft.join("، ") : "")}\nاستخدم الأزرار لحفظها أو إلغائها.`,
+      { reply_markup: keywordDraftKeyboard() }
+    );
+  }
+
+  // If a user issues another slash-command while in the keyword editor,
+  // leave that input flow so the next ordinary text is not misread as keywords.
+  if (text.startsWith("/") && (pending?.action === "keywords" || pending?.action === "keywords_confirm")) {
     await clearPendingInput(env, chatId);
-    const user = await getOrCreateUser(env, chatId);
-    return sendMessage(env, chatId, `تم تحديث الكلمات المفتاحية: ${esc(list.join("، "))}`, { reply_markup: settingsKeyboard(user) });
+    await deleteBotSetting(env, `keyword_draft:${chatId}`);
   }
 
   switch (command) {
@@ -1201,7 +1269,7 @@ async function handleUpdate(env, update) {
       const user = await getOrCreateUser(env, chatId);
       if (!args) {
         const current = user.keywords ? esc(user.keywords.split(",").join("، ")) : "غير محددة (استقبال كل المشاريع)";
-        return sendMessage(env, chatId, `الكلمات المفتاحية الحالية: ${current}\n\nاستخدم /keywords python, بوت, تصميم لتغييرها.\nاستخدم /keywords clear لمسح الفلتر.\nاستخدم /cancel لإلغاء خطوة إدخال الكلمات بدون تغيير.`, { reply_markup: settingsKeyboard(user) });
+        return sendMessage(env, chatId, `الكلمات المفتاحية الحالية: ${current}\n\nاستخدم /keywords python, بوت, تصميم لتغييرها مباشرة.\nاستخدم /keywords clear لمسح الفلتر.\nأو افتح /settings لإدارتها من الأزرار.`, { reply_markup: settingsKeyboard(user) });
       }
       if (/^(clear|مسح)$/i.test(args)) {
         await env.DB.prepare("UPDATE users SET keywords = '' WHERE chat_id = ?1").bind(chatId).run();
@@ -1393,24 +1461,54 @@ async function handleCallback(env, callback) {
       user = await getOrCreateUser(env, chatId);
       await edit(sitesSettingsText(user), sitesKeyboard(parseSites(user.sites)));
     } else if (action === "keywords") {
+      await deleteBotSetting(env, `keyword_draft:${chatId}`);
       await setPendingInput(env, chatId, "keywords");
       await edit(
-        "<b>تعديل الكلمات المفتاحية</b>\n\nابعت الكلمات اللي عايز تتابعها، وافصل بينها بفاصلة. مثال: Python, Excel, تصميم.\n\nلو عايز تستقبل كل المشاريع، اضغط <b>Clear filter</b> — ده يمسح الفلتر ويحفظ التغيير. لو عايز تلغي العملية بدون ما تغيّر إعداداتك، اضغط <b>Cancel</b>.",
+        "<b>تعديل الكلمات المفتاحية</b>\n\nابعت الكلمات اللي عايز تتابعها، وافصل بينها بفاصلة.\nمثال: Python, Excel, تصميم.",
         { inline_keyboard: [
           [{ text: "Clear filter", callback_data: "settings:keywords:clear" }],
-          [{ text: "Cancel", callback_data: "settings:keywords:cancel" }],
           [{ text: "Back to settings", callback_data: "settings:home" }],
         ] }
       );
     } else if (action === "keywords:clear") {
       await env.DB.prepare("UPDATE users SET keywords = '' WHERE chat_id = ?1").bind(chatId).run();
       await clearPendingInput(env, chatId);
+      await deleteBotSetting(env, `keyword_draft:${chatId}`);
       user = await getOrCreateUser(env, chatId);
       await edit("تم مسح فلتر الكلمات. هتوصلك كل المشاريع من المنصات المفعّلة.", settingsKeyboard(user));
+    } else if (action === "keywords:save") {
+      const rawDraft = await getBotSetting(env, `keyword_draft:${chatId}`);
+      let draft = [];
+      try { draft = JSON.parse(rawDraft || "[]"); } catch { draft = []; }
+      if (!Array.isArray(draft) || !draft.length) {
+        await clearPendingInput(env, chatId);
+        await deleteBotSetting(env, `keyword_draft:${chatId}`);
+        user = await getOrCreateUser(env, chatId);
+        await edit("لا توجد كلمات معلّقة للحفظ. لم تتغير إعداداتك.", settingsKeyboard(user));
+      } else {
+        await env.DB.prepare("UPDATE users SET keywords = ?1 WHERE chat_id = ?2").bind(draft.join(","), chatId).run();
+        await clearPendingInput(env, chatId);
+        await deleteBotSetting(env, `keyword_draft:${chatId}`);
+        user = await getOrCreateUser(env, chatId);
+        await edit(`تم حفظ الكلمات المفتاحية: ${esc(draft.join("، "))}`, settingsKeyboard(user));
+      }
+    } else if (action === "keywords:edit") {
+      let draft = [];
+      try { draft = JSON.parse((await getBotSetting(env, `keyword_draft:${chatId}`)) || "[]"); } catch { draft = []; }
+      await deleteBotSetting(env, `keyword_draft:${chatId}`);
+      await setPendingInput(env, chatId, "keywords");
+      await edit(
+        `<b>تعديل الكلمات المفتاحية</b>\n\nابعت القائمة الجديدة مفصولة بفواصل.\nالقائمة السابقة غير المحفوظة: ${esc(Array.isArray(draft) ? draft.join("، ") : "")}`,
+        { inline_keyboard: [
+          [{ text: "Clear filter", callback_data: "settings:keywords:clear" }],
+          [{ text: "Back to settings", callback_data: "settings:home" }],
+        ] }
+      );
     } else if (action === "keywords:cancel") {
       await clearPendingInput(env, chatId);
+      await deleteBotSetting(env, `keyword_draft:${chatId}`);
       user = await getOrCreateUser(env, chatId);
-      await edit(settingsText(user), settingsKeyboard(user));
+      await edit("تم إلغاء التعديل. لم تتغير الكلمات المفتاحية الحالية.", settingsKeyboard(user));
     } else if (action === "toggle") {
       await env.DB.prepare("UPDATE users SET active = CASE WHEN active = 1 THEN 0 ELSE 1 END WHERE chat_id = ?1").bind(chatId).run();
       user = await getOrCreateUser(env, chatId);
@@ -1423,6 +1521,18 @@ async function handleCallback(env, callback) {
   } finally {
     await tg(env, "answerCallbackQuery", { callback_query_id: callback.id }).catch(() => {});
   }
+}
+
+function keywordDraftKeyboard() {
+  return {
+    inline_keyboard: [
+      [{ text: "Save keywords", callback_data: "settings:keywords:save" }],
+      [
+        { text: "Edit keywords", callback_data: "settings:keywords:edit" },
+        { text: "Cancel", callback_data: "settings:keywords:cancel" },
+      ],
+    ],
+  };
 }
 
 function sitesKeyboard(selected) {
@@ -1507,7 +1617,13 @@ function formatMessage(site, project) {
   if (project.budget) lines.push(`💰 ${esc(project.budget)}`);
   for (const item of project.extra || []) lines.push(`📌 ${esc(item)}`);
   if (project.skills?.length) lines.push(`🏷 ${esc(project.skills.join("، "))}`);
-  if (project.description) lines.push("", esc(truncate(project.description, MAX_DESCRIPTION)));
+  if (project.description) {
+    // Telegram sendMessage allows up to 4096 characters. Reserve room for the
+    // final project link and markup, and use as much of the remaining space as possible.
+    const framingLength = lines.join("\n").length + 100;
+    const telegramSafeDescriptionLimit = Math.max(0, Math.min(MAX_DESCRIPTION, 3900 - framingLength));
+    lines.push("", esc(truncate(project.description, telegramSafeDescriptionLimit)));
+  }
   lines.push("", `🔗 <a href="${esc(safeUrl(project.url))}">فتح المشروع</a>`);
   return lines.join("\n");
 }
