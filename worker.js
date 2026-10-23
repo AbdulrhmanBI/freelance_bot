@@ -4,7 +4,7 @@
 // Required bindings/secrets:
 //   DB (D1), BOT_TOKEN, WEBHOOK_SECRET, ADMIN_KEY; ADMIN_ID optional
 // Cron: * * * * *
-// Telegram UI: dynamic clickable profile greeting + /settings inline menu.
+// Telegram UI: clickable profile greeting only on /start; all inline buttons are English.
 // Freelancer source: supported time_updated sort, newest-first, original submission age <= 15 minutes.
 // =====================================================================
 
@@ -687,14 +687,16 @@ async function flushOutbox(env) {
 // Telegram commands/webhook
 // ---------------------------------------------------------------------
 const HELP = [
-  "أهلاً بيك في Freelance Bot",
+  "الأوامر المتاحة في Freelance Bot:",
   "",
-  "تابع مشاريع العمل الحر من مكان واحد، واستقبل إشعارات بالمشاريع الجديدة من المنصات اللي تختارها.",
-  "",
-  "المنصات",
-  "Kafiil | Mostaql | Nafezly | Khamsat | Freelancer",
-  "",
-  "تم تفعيل الإشعارات. تقدر تخصص إعداداتك من خلال /settings.",
+  "/settings - إدارة المنصات والكلمات المفتاحية والإشعارات",
+  "/sites - اختيار المنصات",
+  "/sites all - تفعيل كل المنصات",
+  "/keywords python, Excel - تحديد الكلمات المفتاحية",
+  "/keywords clear - مسح فلتر الكلمات",
+  "/status - عرض إعداداتك الحالية",
+  "/stop - إيقاف الإشعارات",
+  "/start - تشغيل الإشعارات وعرض رسالة الترحيب",
 ].join("\n");
 
 function welcomeMessage(from) {
@@ -723,11 +725,11 @@ function settingsKeyboard(user) {
   return {
     inline_keyboard: [
       [
-        { text: "اختيار المنصات", callback_data: "settings:sites" },
-        { text: "الكلمات المفتاحية", callback_data: "settings:keywords" },
+        { text: "Platforms", callback_data: "settings:sites" },
+        { text: "Keywords", callback_data: "settings:keywords" },
       ],
-      [{ text: user.active ? "إيقاف الإشعارات" : "تشغيل الإشعارات", callback_data: "settings:toggle" }],
-      [{ text: "عرض إعداداتي الحالية", callback_data: "settings:status" }],
+      [{ text: user.active ? "Pause notifications" : "Resume notifications", callback_data: "settings:toggle" }],
+      [{ text: "My current settings", callback_data: "settings:status" }],
     ],
   };
 }
@@ -749,18 +751,11 @@ function settingsText(user) {
   ].join("\n");
 }
 
-function sitesSettingsText(user) {
+function sitesSettingsText(_user) {
   return [
     "<b>اختيار المنصات</b>",
-    "اضغط على المنصة لتفعيلها أو إيقافها.",
-    "",
-    settingsSelectionSummary(user),
+    "اضغط على اسم المنصة لتفعيلها أو إيقافها. علامة الصح تعني أن المنصة مفعّلة.",
   ].join("\n");
-}
-
-function settingsSelectionSummary(user) {
-  const selected = new Set(parseSites(user.sites));
-  return SITES.map((site) => `${esc(site.name)}: ${selected.has(site.key) ? "مفعّلة" : "متوقفة"}`).join("\n");
 }
 
 async function handleUpdate(env, update) {
@@ -812,8 +807,9 @@ async function handleUpdate(env, update) {
         "INSERT INTO users (chat_id, active, sites, keywords, created_at) VALUES (?1, 1, ?2, '', ?3) " +
         "ON CONFLICT(chat_id) DO UPDATE SET active = 1"
       ).bind(chatId, DEFAULT_SITES, Math.floor(Date.now() / 1000)).run());
-      const user = await getOrCreateUser(env, chatId);
-      return sendMessage(env, chatId, welcomeMessage(from), { reply_markup: settingsKeyboard(user) });
+      await getOrCreateUser(env, chatId);
+      // The welcome message appears only on /start and intentionally has no inline keyboard.
+      return sendMessage(env, chatId, welcomeMessage(from));
     }
     case "/stop": {
       await withSchema(env, () => env.DB.prepare("UPDATE users SET active = 0 WHERE chat_id = ?1").bind(chatId).run());
@@ -859,10 +855,13 @@ async function handleUpdate(env, update) {
       const row = await env.DB.prepare("SELECT COUNT(*) AS total, COALESCE(SUM(active), 0) AS active FROM users").first();
       return sendMessage(env, chatId, `المستخدمون: ${row.total} (النشطون: ${row.active})`);
     }
-    case "/help":
+    case "/help": {
+      return sendMessage(env, chatId, HELP);
+    }
     default: {
-      const user = await getOrCreateUser(env, chatId);
-      return sendMessage(env, chatId, HELP, { reply_markup: settingsKeyboard(user) });
+      // Ignore ordinary text and unknown commands unless the user is entering keywords.
+      // Do not send the welcome message or an inline keyboard for every incoming message.
+      return;
     }
   }
 }
@@ -934,14 +933,14 @@ async function handleCallback(env, callback) {
       await setPendingInput(env, chatId, "keywords");
       await edit(
         "<b>تعديل الكلمات المفتاحية</b>\n\nابعت الكلمات اللي عايز تتابعها، وافصل بينها بفاصلة. مثال: Python, Excel, تصميم\n\nلو عايز تستقبل كل المشاريع بدون فلترة، ابعت clear. للإلغاء ابعت /cancel.",
-        { inline_keyboard: [[{ text: "العودة للإعدادات", callback_data: "settings:home" }]] }
+        { inline_keyboard: [[{ text: "Back to settings", callback_data: "settings:home" }]] }
       );
     } else if (action === "toggle") {
       await env.DB.prepare("UPDATE users SET active = CASE WHEN active = 1 THEN 0 ELSE 1 END WHERE chat_id = ?1").bind(chatId).run();
       user = await getOrCreateUser(env, chatId);
       await edit(settingsText(user), settingsKeyboard(user));
     } else if (action === "status") {
-      await edit(settingsText(user), { inline_keyboard: [[{ text: "العودة للإعدادات", callback_data: "settings:home" }]] });
+      await edit(settingsText(user), { inline_keyboard: [[{ text: "Back to settings", callback_data: "settings:home" }]] });
     }
   } catch (error) {
     console.error(`[callback] failed: ${String(error)}`);
@@ -955,15 +954,16 @@ function sitesKeyboard(selected) {
   const rows = [];
   for (let index = 0; index < SITES.length; index += 2) {
     rows.push(SITES.slice(index, index + 2).map((site) => ({
-      text: `${site.name} — ${selectedSet.has(site.key) ? "مفعّلة" : "متوقفة"}`,
+      // Mark selected sites with a check only; leave unselected sites plain.
+      text: `${selectedSet.has(site.key) ? "✓ " : ""}${site.name}`,
       callback_data: `settings:site:${site.key}`,
     })));
   }
   rows.push([
-    { text: "تفعيل الكل", callback_data: "settings:sites:all" },
-    { text: "إلغاء الكل", callback_data: "settings:sites:none" },
+    { text: "Enable all", callback_data: "settings:sites:all" },
+    { text: "Disable all", callback_data: "settings:sites:none" },
   ]);
-  rows.push([{ text: "العودة للإعدادات", callback_data: "settings:home" }]);
+  rows.push([{ text: "Back to settings", callback_data: "settings:home" }]);
   return { inline_keyboard: rows };
 }
 
