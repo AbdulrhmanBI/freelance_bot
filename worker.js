@@ -37,6 +37,7 @@ const SCHEMA = [
   "CREATE TABLE IF NOT EXISTS messages (key TEXT PRIMARY KEY, text TEXT NOT NULL, created_at INTEGER NOT NULL)",
   "CREATE TABLE IF NOT EXISTS outbox (id INTEGER PRIMARY KEY AUTOINCREMENT, chat_id INTEGER NOT NULL, msg_key TEXT NOT NULL)",
   "CREATE TABLE IF NOT EXISTS user_input_state (chat_id INTEGER PRIMARY KEY, action TEXT NOT NULL, updated_at INTEGER NOT NULL)",
+  "CREATE TABLE IF NOT EXISTS bot_settings (key TEXT PRIMARY KEY, value TEXT NOT NULL, updated_at INTEGER NOT NULL)",
   "CREATE INDEX IF NOT EXISTS idx_outbox_chat ON outbox(chat_id)",
   "CREATE INDEX IF NOT EXISTS idx_users_active ON users(active)",
 ];
@@ -690,6 +691,7 @@ const HELP = [
   "الأوامر المتاحة في Freelance Bot:",
   "",
   "/settings - إدارة المنصات والكلمات المفتاحية والإشعارات",
+  "/welcome - لوحة تحرير رسالة الترحيب (للأدمن)",
   "/sites - اختيار المنصات",
   "/sites all - تفعيل كل المنصات",
   "/keywords python, Excel - تحديد الكلمات المفتاحية",
@@ -699,26 +701,203 @@ const HELP = [
   "/start - تشغيل الإشعارات وعرض رسالة الترحيب",
 ].join("\n");
 
-function welcomeMessage(from) {
-  const id = Number(from?.id);
-  const first = String(from?.first_name || "").trim();
-  const last = String(from?.last_name || "").trim();
-  const username = String(from?.username || "").trim();
-  const displayName = [first, last].filter(Boolean).join(" ") || (username ? `@${username}` : "مستخدم تيليجرام");
-  const nameMarkup = Number.isSafeInteger(id) && id > 0
-    ? `<a href="tg://user?id=${id}">${esc(displayName)}</a>`
-    : esc(displayName);
-
-  return [
-    `أهلاً فيك ${nameMarkup} في Freelance Bot`,
-    "",
+function defaultWelcomeTemplate() {
+  const text = [
+    "أهلاً فيك #name_link في Freelance Bot",
     "تابع مشاريع العمل الحر من مكان واحد، واستقبل إشعارات بالمشاريع الجديدة من المنصات اللي تختارها.",
     "",
-    "<b>المنصات</b>",
+    "المنصات المتاحة:",
     "Kafiil | Mostaql | Nafezly | Khamsat | Freelancer",
     "",
     "تم تفعيل الإشعارات. تقدر تخصص إعداداتك من خلال /settings.",
   ].join("\n");
+  const heading = "المنصات المتاحة:";
+  return {
+    text,
+    entities: [{ type: "bold", offset: text.indexOf(heading), length: heading.length }],
+  };
+}
+
+function welcomePanelKeyboard(hasMedia) {
+  const rows = [
+    [{ text: "Edit welcome text", callback_data: "welcome:edit-text" }],
+    [{ text: hasMedia ? "Change welcome media" : "Add welcome media", callback_data: "welcome:set-media" }],
+  ];
+  if (hasMedia) rows.push([{ text: "Remove welcome media", callback_data: "welcome:remove-media" }]);
+  rows.push([{ text: "Preview welcome", callback_data: "welcome:preview" }]);
+  rows.push([{ text: "Reset to default", callback_data: "welcome:reset" }]);
+  return { inline_keyboard: rows };
+}
+
+function welcomePanelText(hasMedia) {
+  return [
+    "<b>Welcome message control panel</b>",
+    "",
+    "Edit the welcome text, attach optional media, preview the result, or restore the default.",
+    "",
+    `Text: editable`,
+    `Media: ${hasMedia ? "configured" : "not set"}`,
+    "",
+    "Use #name_link anywhere in the text to insert the user's clickable Telegram profile name.",
+  ].join("\n");
+}
+
+function isAdmin(env, chatId) {
+  return Boolean(env.ADMIN_ID) && String(chatId) === String(env.ADMIN_ID);
+}
+
+async function getBotSetting(env, key) {
+  return withSchema(env, async () => {
+    const row = await env.DB.prepare("SELECT value FROM bot_settings WHERE key = ?1").bind(key).first();
+    return row?.value ?? null;
+  });
+}
+
+async function setBotSetting(env, key, value) {
+  return withSchema(env, () => env.DB.prepare(
+    "INSERT INTO bot_settings (key, value, updated_at) VALUES (?1, ?2, ?3) " +
+    "ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at"
+  ).bind(key, value, Math.floor(Date.now() / 1000)).run());
+}
+
+async function deleteBotSetting(env, key) {
+  return withSchema(env, () => env.DB.prepare("DELETE FROM bot_settings WHERE key = ?1").bind(key).run());
+}
+
+async function getWelcomeTemplate(env) {
+  const raw = await getBotSetting(env, "welcome_text");
+  if (!raw) return defaultWelcomeTemplate();
+  try {
+    const parsed = JSON.parse(raw);
+    if (parsed && typeof parsed.text === "string") {
+      return { text: parsed.text, entities: Array.isArray(parsed.entities) ? parsed.entities : [] };
+    }
+  } catch (error) {
+    console.error(`[welcome] invalid stored text template: ${String(error)}`);
+  }
+  return defaultWelcomeTemplate();
+}
+
+async function getWelcomeMedia(env) {
+  const raw = await getBotSetting(env, "welcome_media");
+  if (!raw) return null;
+  try {
+    const parsed = JSON.parse(raw);
+    if (parsed && typeof parsed.type === "string" && typeof parsed.file_id === "string") return parsed;
+  } catch (error) {
+    console.error(`[welcome] invalid stored media template: ${String(error)}`);
+  }
+  return null;
+}
+
+function renderWelcomeTemplate(template, from) {
+  const userId = Number(from?.id);
+  const first = String(from?.first_name || "").trim();
+  const last = String(from?.last_name || "").trim();
+  const username = String(from?.username || "").trim();
+  const displayName = [first, last].filter(Boolean).join(" ") || (username ? `@${username}` : "مستخدم تيليجرام");
+  const marker = "#name_link";
+  const sourceText = String(template?.text ?? defaultWelcomeTemplate().text);
+  const sourceEntities = Array.isArray(template?.entities) ? template.entities : [];
+  const occurrences = [];
+  let cursor = 0;
+  while ((cursor = sourceText.indexOf(marker, cursor)) !== -1) {
+    occurrences.push(cursor);
+    cursor += marker.length;
+  }
+
+  let text = sourceText;
+  for (let i = occurrences.length - 1; i >= 0; i--) {
+    const at = occurrences[i];
+    text = text.slice(0, at) + displayName + text.slice(at + marker.length);
+  }
+
+  const delta = displayName.length - marker.length;
+  const mapPosition = (position, isEnd = false) => {
+    const original = Number(position) || 0;
+    let adjustment = 0;
+    for (const at of occurrences) {
+      if (original >= at + marker.length) {
+        adjustment += delta;
+      } else if (original > at || (isEnd && original === at)) {
+        return at + adjustment + (isEnd ? displayName.length : 0);
+      }
+    }
+    return original + adjustment;
+  };
+  const entities = sourceEntities.map((entity) => {
+    const oldOffset = Number(entity.offset) || 0;
+    const oldEnd = oldOffset + (Number(entity.length) || 0);
+    const newOffset = mapPosition(oldOffset, false);
+    const newEnd = mapPosition(oldEnd, true);
+    return { ...entity, offset: newOffset, length: Math.max(0, newEnd - newOffset) };
+  }).filter((entity) => entity.length > 0);
+
+  if (Number.isSafeInteger(userId) && userId > 0) {
+    for (const at of occurrences) {
+      entities.push({
+        type: "text_link",
+        offset: mapPosition(at, false),
+        length: displayName.length,
+        url: `tg://user?id=${userId}`,
+      });
+    }
+  }
+  return { text, entities };
+}
+
+function getWelcomeMediaInfo(message) {
+  if (Array.isArray(message.photo) && message.photo.length) return { type: "photo", file_id: message.photo[message.photo.length - 1].file_id };
+  for (const type of ["animation", "video", "document", "audio", "voice", "video_note", "sticker"]) {
+    if (message[type]?.file_id) return { type, file_id: message[type].file_id };
+  }
+  return null;
+}
+
+async function sendWelcomeMedia(env, chatId, media, caption = null) {
+  if (!media) return;
+  const methodByType = {
+    photo: "sendPhoto", animation: "sendAnimation", video: "sendVideo", document: "sendDocument",
+    audio: "sendAudio", voice: "sendVoice", video_note: "sendVideoNote", sticker: "sendSticker",
+  };
+  const method = methodByType[media.type];
+  if (!method) throw new Error(`Unsupported welcome media type: ${media.type}`);
+  const payload = { chat_id: chatId, [media.type]: media.file_id };
+  const captionTypes = new Set(["photo", "animation", "video", "document", "audio", "voice"]);
+  if (caption && captionTypes.has(media.type) && caption.text.length <= 1024) {
+    payload.caption = caption.text;
+    payload.caption_entities = caption.entities;
+  }
+  await tg(env, method, payload);
+}
+
+async function sendWelcome(env, chatId, from) {
+  const [template, media] = await Promise.all([getWelcomeTemplate(env), getWelcomeMedia(env)]);
+  const rendered = renderWelcomeTemplate(template, from);
+  if (media) {
+    const captionTypes = new Set(["photo", "animation", "video", "document", "audio", "voice"]);
+    const canUseCaption = captionTypes.has(media.type) && rendered.text.length <= 1024;
+    try {
+      // Caption-capable media is combined with the personalized text in one Telegram
+      // message. Stickers/video notes cannot have captions, so send them before the text.
+      await sendWelcomeMedia(env, chatId, media, canUseCaption ? rendered : null);
+      if (canUseCaption) return;
+    } catch (error) {
+      console.error(`[welcome] media send failed: ${String(error)}`);
+      // If the caption caused the failure, make a second attempt without the caption.
+      try {
+        await sendWelcomeMedia(env, chatId, media, null);
+      } catch (mediaError) {
+        console.error(`[welcome] media-only fallback failed: ${String(mediaError)}`);
+      }
+    }
+  }
+  return tg(env, "sendMessage", {
+    chat_id: chatId,
+    text: rendered.text,
+    entities: rendered.entities,
+    disable_web_page_preview: true,
+  });
 }
 
 function settingsKeyboard(user) {
@@ -761,25 +940,56 @@ function sitesSettingsText(_user) {
 async function handleUpdate(env, update) {
   if (update.callback_query) return handleCallback(env, update.callback_query);
   const msg = update.message;
-  if (!msg || typeof msg.text !== "string" || msg.chat?.type !== "private") return;
+  if (!msg || msg.chat?.type !== "private") return;
 
   const chatId = msg.chat.id;
   const from = msg.from || {};
-  const text = msg.text.trim();
+  const rawText = typeof msg.text === "string" ? msg.text : "";
+  const text = rawText.trim();
   const first = text.split(/\s+/)[0] || "";
   const command = first.toLowerCase().replace(/@.*$/, "");
   const args = text.slice(first.length).trim();
 
   if (command === "/cancel") {
     await clearPendingInput(env, chatId);
+    if (isAdmin(env, chatId)) {
+      const media = await getWelcomeMedia(env);
+      return sendMessage(env, chatId, "Cancelled.", { reply_markup: welcomePanelKeyboard(Boolean(media)) });
+    }
     const user = await getOrCreateUser(env, chatId);
     return sendMessage(env, chatId, "تم إلغاء تعديل الكلمات المفتاحية.", { reply_markup: settingsKeyboard(user) });
   }
 
+  const pending = await getPendingInput(env, chatId);
+  if (pending?.action === "welcome_text" && isAdmin(env, chatId)) {
+    if (!rawText) return sendMessage(env, chatId, "ابعت رسالة نصية للترحيب، أو /cancel للإلغاء.");
+    if (rawText.length > 4000) return sendMessage(env, chatId, "رسالة الترحيب أطول من الحد المسموح. ابعت نصًا أقصر أو /cancel.");
+    const template = { text: rawText, entities: Array.isArray(msg.entities) ? msg.entities : [] };
+    await setBotSetting(env, "welcome_text", JSON.stringify(template));
+    await clearPendingInput(env, chatId);
+    const media = await getWelcomeMedia(env);
+    return sendMessage(env, chatId, "Welcome text saved. The #name_link placeholder will become the recipient's clickable Telegram profile name.", {
+      reply_markup: welcomePanelKeyboard(Boolean(media)),
+    });
+  }
+  if (pending?.action === "welcome_media" && isAdmin(env, chatId)) {
+    const media = getWelcomeMediaInfo(msg);
+    if (!media) {
+      return sendMessage(env, chatId, "Unsupported media. Send a photo, sticker, video, animation/GIF, document, audio, voice message, or video note. Or send /cancel.");
+    }
+    await setBotSetting(env, "welcome_media", JSON.stringify(media));
+    await clearPendingInput(env, chatId);
+    return sendMessage(env, chatId, "Welcome media saved. It will be sent before the personalized welcome text.", {
+      reply_markup: welcomePanelKeyboard(true),
+    });
+  }
+
+  // Text/caption customization and keyword entry must not affect ordinary messages.
+  if (!text) return;
+
   // When the user has pressed the keywords button, accept their next plain-text message.
   // Slash commands still work normally while waiting for input.
   if (!text.startsWith("/")) {
-    const pending = await getPendingInput(env, chatId);
     if (pending?.action === "keywords") {
       const lowered = text.toLocaleLowerCase();
       if (/^(clear|مسح|إلغاء الفلتر|الغاء الفلتر)$/i.test(lowered)) {
@@ -809,7 +1019,7 @@ async function handleUpdate(env, update) {
       ).bind(chatId, DEFAULT_SITES, Math.floor(Date.now() / 1000)).run());
       await getOrCreateUser(env, chatId);
       // The welcome message appears only on /start and intentionally has no inline keyboard.
-      return sendMessage(env, chatId, welcomeMessage(from));
+      return sendWelcome(env, chatId, from);
     }
     case "/stop": {
       await withSchema(env, () => env.DB.prepare("UPDATE users SET active = 0 WHERE chat_id = ?1").bind(chatId).run());
@@ -850,6 +1060,13 @@ async function handleUpdate(env, update) {
       const user = await getOrCreateUser(env, chatId);
       return sendMessage(env, chatId, settingsText(user), { reply_markup: settingsKeyboard(user) });
     }
+    case "/welcome": {
+      if (!isAdmin(env, chatId)) {
+        return sendMessage(env, chatId, "لوحة التحكم في رسالة الترحيب متاحة للأدمن فقط. اضبط ADMIN_ID على Telegram user ID الخاص بك في إعدادات الـ Worker.");
+      }
+      const media = await getWelcomeMedia(env);
+      return sendMessage(env, chatId, welcomePanelText(Boolean(media)), { reply_markup: welcomePanelKeyboard(Boolean(media)) });
+    }
     case "/stats": {
       if (!env.ADMIN_ID || String(chatId) !== String(env.ADMIN_ID)) return;
       const row = await env.DB.prepare("SELECT COUNT(*) AS total, COALESCE(SUM(active), 0) AS active FROM users").first();
@@ -871,6 +1088,56 @@ async function handleCallback(env, callback) {
   try {
     const data = String(callback.data || "");
     if (!chatId) return;
+
+    if (data.startsWith("welcome:")) {
+      if (!isAdmin(env, chatId)) {
+        await tg(env, "answerCallbackQuery", { callback_query_id: callback.id, text: "Admin only", show_alert: true }).catch(() => {});
+        return;
+      }
+      const action = data.slice("welcome:".length);
+      const panel = async () => {
+        const media = await getWelcomeMedia(env);
+        await tg(env, "editMessageText", {
+          chat_id: chatId,
+          message_id: callback.message.message_id,
+          text: welcomePanelText(Boolean(media)),
+          parse_mode: "HTML",
+          reply_markup: welcomePanelKeyboard(Boolean(media)),
+        });
+      };
+      if (action === "edit-text") {
+        await setPendingInput(env, chatId, "welcome_text");
+        await tg(env, "editMessageText", {
+          chat_id: chatId,
+          message_id: callback.message.message_id,
+          text: "Send the complete welcome text in your next message. Keep the exact line breaks you want and include #name_link where the clickable profile name should appear. Telegram text formatting/entities are preserved. Use /cancel to cancel.",
+          reply_markup: { inline_keyboard: [[{ text: "Back to welcome panel", callback_data: "welcome:panel" }]] },
+        });
+      } else if (action === "set-media") {
+        await setPendingInput(env, chatId, "welcome_media");
+        await tg(env, "editMessageText", {
+          chat_id: chatId,
+          message_id: callback.message.message_id,
+          text: "Send one photo, sticker, video, animation/GIF, document, audio, voice message, or video note. The media will be sent before the personalized welcome text. Use /cancel to cancel.",
+          reply_markup: { inline_keyboard: [[{ text: "Back to welcome panel", callback_data: "welcome:panel" }]] },
+        });
+      } else if (action === "remove-media") {
+        await deleteBotSetting(env, "welcome_media");
+        await panel();
+      } else if (action === "reset") {
+        await deleteBotSetting(env, "welcome_text");
+        await deleteBotSetting(env, "welcome_media");
+        await clearPendingInput(env, chatId);
+        await panel();
+      } else if (action === "preview") {
+        await sendWelcome(env, chatId, callback.from || callback.message?.from || {});
+        await panel();
+      } else if (action === "panel") {
+        await clearPendingInput(env, chatId);
+        await panel();
+      }
+      return;
+    }
 
     // Backward-compatible site toggles from the older /sites keyboard.
     if (data.startsWith("t:")) {
@@ -1320,6 +1587,7 @@ export default {
           commands: [
             { command: "start", description: "تشغيل الإشعارات" },
             { command: "settings", description: "إعدادات البوت" },
+            { command: "welcome", description: "تحرير رسالة الترحيب (للأدمن)" },
             { command: "sites", description: "اختيار المنصات" },
             { command: "keywords", description: "تعديل الكلمات المفتاحية" },
             { command: "status", description: "عرض إعداداتك" },
