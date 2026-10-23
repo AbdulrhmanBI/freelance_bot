@@ -6,7 +6,7 @@ compatibility_date = "2025-06-01"
 [triggers]
 crons = ["* * * * *"]
 
-# قاعدة البيانات: اعملها بـ  npx wrangler d1 create jobs
+# قاعدة البيانات: اعملها بـ npx wrangler d1 create jobs
 # وحط الـ database_id اللي هيطلعلك هنا
 [[d1_databases]]
 binding = "DB"
@@ -24,9 +24,10 @@ persist = true
 
 [vars]
 ADMIN_ID = "8571353627"
+JOBS_CHANNEL_ID = "@DataGigs"
 
 # الـ Secrets بتتضاف بالأوامر دي (مش هنا):
-#   npx wrangler secret put BOT_TOKEN
-#   npx wrangler secret put WEBHOOK_SECRET
-#   npx wrangler secret put ADMIN_KEY
-#   npx wrangler secret put ADMIN_ID      (اختياري)
+# npx wrangler secret put BOT_TOKEN
+# npx wrangler secret put WEBHOOK_SECRET
+# npx wrangler secret put ADMIN_KEY
+# npx wrangler secret put ADMIN_ID (اختياري)
