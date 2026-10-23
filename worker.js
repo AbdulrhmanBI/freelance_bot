@@ -6,6 +6,8 @@
 //   DB (D1), BOT_TOKEN, WEBHOOK_SECRET, ADMIN_KEY; ADMIN_ID optional
 // Cron: * * * * *
 // Telegram UI: clickable profile greeting only on /start; all inline buttons are English.
+// v2: precise anti-bot detection (normal pages are no longer discarded), line-based extraction of
+//     Mostaql/Kafiil/Khamsat project details, Telegram 4096-char safety, /?probe=<url> diagnostics.
 // Freelancer source: supported time_updated sort, newest-first, original submission age <= 15 minutes.
 // =====================================================================
 
@@ -54,7 +56,7 @@ function htmlSite({ key, name, base, listUrl, linkRe }) {
       const res = await fetch(listUrl, { headers: HEADERS, redirect: "follow" });
       if (!res.ok) throw new Error(`${key} list HTTP ${res.status}`);
       const html = await res.text();
-      if (looksLikeChallenge(html)) throw new Error(`${key} list returned an anti-bot/challenge page`);
+      if (looksLikeChallenge(html, res)) throw new Error(`${key} list returned an anti-bot/challenge page`);
 
       const found = new Map();
       for (const match of html.matchAll(linkRe)) {
@@ -70,7 +72,7 @@ function htmlSite({ key, name, base, listUrl, linkRe }) {
       const res = await fetch(item.url, { headers: HEADERS, redirect: "follow" });
       if (!res.ok) throw new Error(`${key} detail HTTP ${res.status}`);
       const html = await res.text();
-      if (looksLikeChallenge(html)) throw new Error(`${key} detail returned an anti-bot/challenge page`);
+      if (looksLikeChallenge(html, res)) throw new Error(`${key} detail returned an anti-bot/challenge page`);
       return parseHtmlProject(key, html, item);
     },
   };
@@ -307,7 +309,7 @@ const nafezlyTelegram = {
         }
 
         const html = await response.text();
-        if (looksLikeChallenge(html) || /javascript\s+is\s+disabled|enable\s+javascript/i.test(html.slice(0, 30000))) {
+        if (looksLikeChallenge(html, response)) {
           lastReason = `challenge/JavaScript placeholder on ${host}`;
           console.warn(`[nafezly] detail page was a challenge/JS placeholder for #${item.id} on ${host}; preserving the official Telegram project link`);
           continue;
@@ -329,6 +331,7 @@ const nafezlyTelegram = {
           ...pageItem,
           url: feedItem.url,
           title: titleIsUseful ? pageItem.title : feedItem.title,
+          debug: { ...(pageItem.debug || {}), titleFrom: titleIsUseful ? "project-page" : "telegram-feed", feedTitleLooksCut: /(?:…|\.\.\.)\s*$/.test(feedItem.title || "") },
           description: usePageDescription ? pageDescription : feedDescription,
           budget: pageItem.budget || feedItem.budget || "",
           skills: pageItem.skills?.length ? pageItem.skills : (feedItem.skills || []),
@@ -424,7 +427,7 @@ const khamsatSite = {
     const response = await fetch(this.listUrl, { headers: HEADERS, redirect: "follow" });
     if (!response.ok) throw new Error(`khamsat list HTTP ${response.status}`);
     const html = await response.text();
-    if (looksLikeChallenge(html)) throw new Error("khamsat listing returned a challenge page; no reliable project list available");
+    if (looksLikeChallenge(html, response)) throw new Error("khamsat listing returned a challenge page; no reliable project list available");
 
     const found = new Map();
     const anchorRe = /<a\b[^>]*\bhref\s*=\s*(["'])(.*?)\1[^>]*>([\s\S]*?)<\/a>/gi;
@@ -485,13 +488,13 @@ const khamsatSite = {
         return fallback;
       }
       const html = await response.text();
-      if (looksLikeChallenge(html)) {
+      if (looksLikeChallenge(html, response)) {
         console.warn(`[khamsat] detail returned JS/challenge placeholder for #${item.id}; sending listing title and project link`);
         return fallback;
       }
       const parsed = parseHtmlProject("khamsat", html, item);
       const title = isGenericTitle(parsed.title, "khamsat") ? fallback.title : parsed.title;
-      const description = isUsefulDescription(parsed.description, title) ? parsed.description : fallback.description;
+      const description = parsed.description || fallback.description;
       const result = {
         ...fallback,
         ...parsed,
@@ -501,7 +504,7 @@ const khamsatSite = {
         skills: parsed.skills?.length ? parsed.skills : fallback.skills,
         extra: parsed.extra?.length ? parsed.extra : fallback.extra,
       };
-      console.log(`[khamsat] detail source=${description ? "project-page" : "listing-title-fallback"}; id=${item.id}; title=${title.slice(0, 100)}; descriptionChars=${description.length}`);
+      console.log(`[khamsat] detail source=${description ? (parsed.debug?.descSource || "project-page") : "listing-title-fallback"}; id=${item.id}; title=${title.slice(0, 100)}; descriptionChars=${description.length}; htmlChars=${html.length}`);
       return result;
     } catch (error) {
       console.warn(`[khamsat] detail fetch failed for #${item.id}: ${String(error)}; sending listing title and project link`);
@@ -532,11 +535,120 @@ const SITES = [
 ];
 const SITE_KEYS = SITES.map((site) => site.key);
 
-function looksLikeChallenge(html) {
-  // Some sites (notably Khamsat) return a JS-disabled/anti-bot placeholder
-  // with HTTP 200. Never parse that placeholder as if it were a real project.
-  const source = String(html).slice(0, 50000);
-  return /cf-chl-|challenge-platform|verify you are human|checking your browser|just a moment\.\.\.|javascript\s+is\s+disabled|enable\s+javascript|javascript\s+must\s+be\s+enabled|please\s+enable\s+javascript|access denied/i.test(source);
+// A real anti-bot interstitial is a tiny page whose ONLY content is the challenge.
+// Do NOT match on "challenge-platform" or "enable javascript" alone: Cloudflare injects
+// /cdn-cgi/challenge-platform/... into perfectly normal pages, and many sites carry a
+// <noscript>"enable JavaScript"</noscript> notice. Treating those as challenges made the
+// bot discard good project pages (Khamsat/Nafezly) and fall back to the title only.
+function visibleText(html) {
+  return decode(String(html)
+    .replace(/<!--([\s\S]*?)-->/g, " ")
+    .replace(/<(script|style|noscript|svg)\b[\s\S]*?<\/\1>/gi, " ")
+    .replace(/<[^>]+>/g, " "))
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function looksLikeChallenge(html, response = null) {
+  if (response?.headers?.get?.("cf-mitigated")) return true;
+  const source = String(html || "");
+  const head = source.slice(0, 20000);
+  if (/<title[^>]*>\s*(?:just a moment|attention required|access denied|checking your browser|verify you are human)/i.test(head)) return true;
+  if (/id=["']challenge-(?:form|running|error-text|stage)["']|cf-browser-verification|class=["'][^"']*cf-error-details/i.test(head)) return true;
+  if (source.length < 30000) {
+    const visible = visibleText(source);
+    if (visible.length < 600 && /enable javascript|javascript\s+(?:is\s+)?(?:disabled|required)|verify you are human|checking your browser|just a moment/i.test(visible)) return true;
+  }
+  return false;
+}
+
+// Labels that appear as standalone lines on the project pages (Mostaql, Kafiil, Nafezly...).
+// Used to know where one section ends and the next begins, so a description that happens
+// to contain the word "الميزانية" is not cut in the middle.
+const PROJECT_LABELS = [
+  "تفاصيل المشروع", "تفاصيل الطلب", "وصف المشروع", "حالة المشروع", "تاريخ النشر", "الميزانية",
+  "الميزانية المتوقعة", "مدة التنفيذ", "مدة المشروع", "المهارات", "المهارات المطلوبة", "صاحب المشروع",
+  "صاحب الطلب", "العروض المقدمة", "تقدم للمشروع", "عروض", "أضف عرضك", "معلومات المشروع",
+  "عدد العروض", "متوسط العروض", "عن الموضوع",
+];
+const DESCRIPTION_STOP_LABELS = PROJECT_LABELS.filter((label) => !["تفاصيل المشروع", "تفاصيل الطلب", "وصف المشروع"].includes(label));
+
+function plainLines(plain) {
+  return String(plain || "").split("\n").map((line) => line.trim());
+}
+
+function isLabelLine(line, labels) {
+  return labels.some((label) => line === label || line.startsWith(`${label}:`) || line.startsWith(`${label}：`));
+}
+
+// Text of the section that starts at a standalone label line and runs until the next label line.
+function sectionBetweenLines(plain, startLabels, stopLabels) {
+  const lines = plainLines(plain);
+  const start = lines.findIndex((line) => isLabelLine(line, startLabels));
+  if (start < 0) return "";
+  const out = [];
+  const inline = lines[start].replace(/^[^:：]*[:：]\s*/, "");
+  if (inline && inline !== lines[start]) out.push(inline);
+  for (let i = start + 1; i < lines.length; i++) {
+    if (isLabelLine(lines[i], stopLabels)) break;
+    out.push(lines[i]);
+  }
+  return out.join("\n").replace(/\n{3,}/g, "\n\n").trim().slice(0, 6000);
+}
+
+// Value that follows a label: either on the same line ("الميزانية $25 - $50") or on the next line.
+function labelValue(plain, labels, { numeric = false } = {}) {
+  const lines = plainLines(plain);
+  const numericStart = /^[$€£]?\s*[\d٠-٩]/;
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    const label = labels.find((l) => line === l || line.startsWith(`${l} `) || line.startsWith(`${l}:`) || line.startsWith(`${l}：`));
+    if (!label) continue;
+    const rest = line.slice(label.length).replace(/^[\s:：|\-]+/, "").trim();
+    if (rest && (!numeric || numericStart.test(rest))) return rest;
+    if (rest) continue; // a sentence that merely starts with the label word
+    for (let j = i + 1; j < Math.min(lines.length, i + 4); j++) {
+      if (!lines[j]) continue;
+      if (isLabelLine(lines[j], PROJECT_LABELS)) break;
+      if (!numeric || numericStart.test(lines[j])) return lines[j];
+      break;
+    }
+  }
+  return "";
+}
+
+// Khamsat "طلبات الخدمات غير الموجودة": the request body sits between the heading and the
+// "عن الموضوع" block (there is no "تفاصيل الطلب" label on the page).
+function extractKhamsatDescription(plain, title) {
+  const lines = plainLines(plain).filter(Boolean);
+  const aboutIdx = lines.findIndex((line) => line === "عن الموضوع");
+  if (aboutIdx < 0) return "";
+  const norm = (value) => cleanText(value).replace(/\s+/g, " ").toLocaleLowerCase();
+  const wanted = norm(title || "");
+  let start = -1;
+  if (wanted) {
+    for (let i = aboutIdx - 1; i >= 0; i--) {
+      if (norm(lines[i]) === wanted) { start = i + 1; break; }
+    }
+  }
+  if (start < 0) {
+    for (let i = aboutIdx - 1; i >= 0; i--) {
+      if (lines[i] === "طلبات الخدمات غير الموجودة") { start = i + 2; break; }
+    }
+  }
+  if (start < 0 || start >= aboutIdx) return "";
+  return lines.slice(start, aboutIdx).join("\n");
+}
+
+// Everything after the description section (from the first following label line on).
+function textAfterDescription(plain) {
+  const lines = plainLines(plain);
+  const start = lines.findIndex((line) => isLabelLine(line, ["تفاصيل المشروع", "وصف المشروع", "تفاصيل الطلب"]));
+  if (start < 0) return plain;
+  for (let i = start + 1; i < lines.length; i++) {
+    if (isLabelLine(lines[i], DESCRIPTION_STOP_LABELS)) return lines.slice(i).join("\n");
+  }
+  return plain;
 }
 
 function parseHtmlProject(siteKey, html, item) {
@@ -551,37 +663,53 @@ function parseHtmlProject(siteKey, html, item) {
     title = slugTitle || `مشروع جديد #${item.id}`;
   }
 
-  // Some sites expose the full project description only in the visible HTML,
-  // not in Open Graph metadata. Prefer label-bounded text, then metadata/JSON-LD,
-  // then likely content containers/paragraphs.
+  // Description, best source first. Open Graph / meta descriptions are usually cut to
+  // ~160-200 characters, so they are only a last resort.
   let description = "";
-  if (siteKey === "mostaql") {
-    description = textAfterAnyLabel(plain, ["تفاصيل المشروع", "وصف المشروع"], ["حالة المشروع", "الميزانية", "مدة التنفيذ"]);
-  } else if (siteKey === "nafezly") {
-    // Stop at the skills/action area so it does not accidentally absorb the bid list or footer.
-    description = textAfterAnyLabel(
-      plain,
-      ["تفاصيل المشروع", "وصف المشروع", "قم بوصف المشروع"],
-      ["مهارات مطلوبة", "المهارات المطلوبة", "الميزانية", "المدة المتوقعة", "عدد العروض", "حالة المشروع", "أضف عرضك الآن"]
-    );
-  } else if (siteKey === "khamsat") {
-    description = textAfterAnyLabel(plain, ["تفاصيل الطلب", "تفاصيل المشروع", "وصف الطلب"], ["آخر تفاعل", "تاريخ النشر", "صاحب الطلب", "الميزانية"]);
-  }
-  if (!isUsefulDescription(description, title)) description = "";
-  if (!description) description = meta(html, "og:description") || meta(html, "description") || meta(html, "twitter:description") || cleanText(jsonLd.description || "");
-  if (!isUsefulDescription(description, title)) description = "";
-  if (!description) description = extractLikelyDescription(html, title);
-  description = normalizeDescription(description, title);
+  let descSource = "none";
+  const accept = (value, source, minLength = 8) => {
+    if (description) return;
+    const cleaned = normalizeDescription(value, title, minLength);
+    if (cleaned) { description = cleaned; descSource = source; }
+  };
 
-  let budget = extractBudget(plain);
+  if (siteKey === "khamsat") accept(extractKhamsatDescription(plain, title), "khamsat-heading-block");
+  accept(sectionBetweenLines(plain, ["تفاصيل المشروع", "وصف المشروع", "تفاصيل الطلب"], DESCRIPTION_STOP_LABELS), "label-lines");
+  if (!description) {
+    const inline = siteKey === "khamsat"
+      ? textAfterAnyLabel(plain, ["تفاصيل الطلب", "تفاصيل المشروع", "وصف الطلب"], ["آخر تفاعل", "تاريخ النشر", "صاحب الطلب", "الميزانية"])
+      : textAfterAnyLabel(plain, ["تفاصيل المشروع", "وصف المشروع", "قم بوصف المشروع"], ["مهارات مطلوبة", "المهارات المطلوبة", "حالة المشروع", "المدة المتوقعة", "عدد العروض", "أضف عرضك الآن"]);
+    accept(inline, "label-inline", 25);
+  }
+  accept(jsonLd.description, "json-ld", 25);
+  accept(extractLikelyDescription(html, title), "container-heuristic", 25);
+  accept(meta(html, "og:description") || meta(html, "description") || meta(html, "twitter:description"), "meta-description-truncated", 25);
+
+  // Metadata (budget, duration, bids, skills) lives AFTER the description block.
+  const afterBody = textAfterDescription(plain);
+
+  // Budget: read the value that follows the label line first (accurate), then fall back.
+  let budget = "";
+  const budgetValue = labelValue(afterBody, ["الميزانية", "الميزانية المتوقعة", "ميزانية المشروع"], { numeric: true });
+  if (budgetValue) budget = extractBudget(`الميزانية: ${budgetValue}`);
   if (!budget) budget = extractBudget(`${meta(html, "og:description")} ${meta(html, "description")} ${jsonLd.description || ""}`);
 
-  const skills = extractSkills(plain);
+  const skills = extractSkills(afterBody);
   const extra = [];
-  const bids = plain.match(/(?:عدد العروض|العروض|bids)\s*:?\s*(\d+)/i);
+  const bids = normalizeDigits(afterBody).match(/عدد العروض\s*:?\s*(\d+)/);
   if (bids) extra.push(`عدد العروض: ${bids[1]}`);
+  const duration = labelValue(afterBody, ["مدة التنفيذ", "مدة المشروع"]);
+  if (duration && duration.length <= 40) extra.push(`المدة: ${duration}`);
 
-  return { ...item, title: title || `مشروع جديد #${item.id}`, description, budget, skills, extra };
+  return {
+    ...item,
+    title: title || `مشروع جديد #${item.id}`,
+    description,
+    budget,
+    skills,
+    extra,
+    debug: { descSource, htmlLength: String(html).length, textLength: plain.length, descriptionLength: description.length },
+  };
 }
 
 function extractJsonLd(html) {
@@ -655,11 +783,29 @@ function matchingElementInnerHTML(html, tag, openIndex) {
 }
 
 function extractSkills(plain) {
+  const lines = plainLines(plain);
+  const skillLabels = ["المهارات المطلوبة", "المهارات"];
+  const index = lines.findIndex((line) => skillLabels.some((label) => line === label || line.startsWith(`${label}:`) || line.startsWith(`${label}：`) || line.startsWith(`${label} `)));
+  if (index < 0) return [];
   const result = [];
-  const match = String(plain).match(/(?:المهارات المطلوبة|المهارات|skills)\s*:?\s*([\s\S]{0,300})/i);
-  if (!match) return result;
-  const section = match[1].split(/(?:الميزانية|مدة التنفيذ|حالة المشروع|عدد العروض|الوصف|تفاصيل المشروع)/i)[0];
-  return section.split(/[،,|\n•·]/).map((s) => cleanText(s)).filter((s) => s.length > 1 && s.length < 50).slice(0, 8);
+  const label = skillLabels.find((l) => lines[index].startsWith(l)) || "";
+  const sameLine = lines[index].slice(label.length).replace(/^[\s:：]+/, "");
+  if (sameLine && sameLine.length <= 60 && !isLabelLine(sameLine, PROJECT_LABELS)) {
+    for (const part of sameLine.split(/[،,|•·]/)) {
+      const skill = cleanText(part);
+      if (skill.length > 1 && skill.length < 50) result.push(skill);
+    }
+  }
+  for (let i = index + 1; i < lines.length && result.length < 8; i++) {
+    const line = lines[i];
+    if (!line) { if (result.length) break; continue; }
+    if (isLabelLine(line, PROJECT_LABELS) || line.length > 60) break;
+    for (const part of line.split(/[،,|•·]/)) {
+      const skill = cleanText(part);
+      if (skill.length > 1 && skill.length < 50) result.push(skill);
+    }
+  }
+  return [...new Set(result)].slice(0, 8);
 }
 
 // ---------------------------------------------------------------------
@@ -888,6 +1034,11 @@ async function flushOutbox(env) {
     statements.push(env.DB.prepare("UPDATE users SET active = 0 WHERE chat_id IN (SELECT value FROM json_each(?1))").bind(idsJson));
     statements.push(env.DB.prepare("DELETE FROM outbox WHERE chat_id IN (SELECT value FROM json_each(?1))").bind(idsJson));
   }
+  // A notice that could not be delivered for 3 hours is stale: drop it instead of retrying forever.
+  statements.push(
+    env.DB.prepare("DELETE FROM outbox WHERE msg_key IN (SELECT key FROM messages WHERE created_at < ?1)")
+      .bind(Math.floor(Date.now() / 1000) - 3 * 3600)
+  );
   statements.push(
     env.DB.prepare("DELETE FROM messages WHERE created_at < ?1 AND key NOT IN (SELECT msg_key FROM outbox)")
       .bind(Math.floor(Date.now() / 1000) - 600)
@@ -1780,19 +1931,28 @@ const sendMessage = (env, chat_id, text, extra = {}) => tg(env, "sendMessage", {
 });
 
 function formatMessage(site, project) {
-  const lines = [`🆕 <b>${esc(project.title || `مشروع جديد #${project.id}`)}</b>`, `🌐 ${esc(site.name)}`];
-  if (project.budget) lines.push(`💰 ${esc(project.budget)}`);
-  for (const item of project.extra || []) lines.push(`📌 ${esc(item)}`);
-  if (project.skills?.length) lines.push(`🏷 ${esc(project.skills.join("، "))}`);
-  if (project.description) {
-    // Telegram sendMessage allows up to 4096 characters. Reserve room for the
-    // final project link and markup, and use as much of the remaining space as possible.
-    const framingLength = lines.join("\n").length + 100;
-    const telegramSafeDescriptionLimit = Math.max(0, Math.min(MAX_DESCRIPTION, 3900 - framingLength));
-    lines.push("", esc(truncate(project.description, telegramSafeDescriptionLimit)));
+  const build = (descriptionLimit) => {
+    const title = truncate(project.title || `مشروع جديد #${project.id}`, 300);
+    const lines = [`🆕 <b>${esc(title)}</b>`, `🌐 ${esc(site.name)}`];
+    if (project.budget) lines.push(`💰 ${esc(project.budget)}`);
+    for (const item of project.extra || []) lines.push(`📌 ${esc(item)}`);
+    if (project.skills?.length) lines.push(`🏷 ${esc(project.skills.join("، "))}`);
+    if (project.description && descriptionLimit > 0) {
+      lines.push("", esc(truncate(project.description, descriptionLimit)));
+    }
+    lines.push("", `🔗 <a href="${esc(safeUrl(project.url))}">فتح المشروع</a>`);
+    return lines.join("\n");
+  };
+
+  // Telegram allows 4096 characters AFTER entities are parsed, and escaping (&amp; &lt; ...)
+  // makes the text longer than the raw description. Shrink until the final text fits.
+  let limit = MAX_DESCRIPTION;
+  let text = build(limit);
+  while (text.length > 3990 && limit > 0) {
+    limit = limit > 300 ? Math.floor(limit * 0.85) : 0;
+    text = build(limit);
   }
-  lines.push("", `🔗 <a href="${esc(safeUrl(project.url))}">فتح المشروع</a>`);
-  return lines.join("\n");
+  return text;
 }
 
 // ---------------------------------------------------------------------
@@ -1853,6 +2013,31 @@ async function dryRun() {
     }
   }));
   return output;
+}
+
+const PROBE_HOSTS = ["khamsat.com", "nafezly.com", "mostaql.com", "kafiil.com", "t.me"];
+
+async function probePage(rawUrl) {
+  const target = new URL(String(rawUrl || ""));
+  if (!["https:", "http:"].includes(target.protocol) || !PROBE_HOSTS.some((host) => target.hostname === host || target.hostname.endsWith(`.${host}`))) {
+    throw new Error(`probe is limited to: ${PROBE_HOSTS.join(", ")}`);
+  }
+  const response = await fetch(target.href, { headers: HEADERS, redirect: "follow" });
+  const html = await response.text();
+  const text = htmlToText(html);
+  const siteKey = /khamsat/.test(target.hostname) ? "khamsat" : /nafezly/.test(target.hostname) ? "nafezly" : /mostaql/.test(target.hostname) ? "mostaql" : "kafiil";
+  const idMatch = target.pathname.match(/(\d+)/);
+  const parsed = parseHtmlProject(siteKey, html, { id: idMatch ? Number(idMatch[1]) : 0, url: target.href });
+  return {
+    status: response.status,
+    finalUrl: response.url,
+    htmlLength: html.length,
+    cfMitigated: response.headers.get("cf-mitigated"),
+    looksLikeChallenge: looksLikeChallenge(html, response),
+    htmlHead: html.slice(0, 300),
+    visibleTextHead: text.slice(0, 1500),
+    parsed: { ...parsed, description: truncate(parsed.description || "", 800) },
+  };
 }
 
 // ---------------------------------------------------------------------
@@ -1978,18 +2163,18 @@ function normalizeDigits(value) {
   return String(value).replace(/[٠-٩]/g, (digit) => String("٠١٢٣٤٥٦٧٨٩".indexOf(digit))).replace(/٫/g, ".");
 }
 
-function normalizeDescription(value, title) {
+function normalizeDescription(value, title, minLength = 25) {
   let result = cleanText(value);
-  if (!isUsefulDescription(result, title)) return "";
+  if (!isUsefulDescription(result, title, minLength)) return "";
   // Remove common adjacent labels at the beginning/end of scraped content.
   result = result.replace(/^(?:تفاصيل المشروع|تفاصيل الطلب|وصف المشروع|الوصف)\s*[:：-]?\s*/i, "");
   result = result.replace(/\s+(?:حالة المشروع|عدد العروض|آخر تفاعل)\s*:?\s*[\s\S]*$/i, "").trim();
-  return isUsefulDescription(result, title) ? result.slice(0, 6000) : "";
+  return isUsefulDescription(result, title, minLength) ? result.slice(0, 6000) : "";
 }
 
-function isUsefulDescription(value, title) {
+function isUsefulDescription(value, title, minLength = 25) {
   const text = cleanText(value);
-  if (text.length < 25) return false;
+  if (text.length < minLength) return false;
   if (title && text.toLocaleLowerCase() === cleanText(title).toLocaleLowerCase()) return false;
   if (/^(?:تسجيل الدخول|إنشاء حساب|طلبات الخدمات غير الموجودة|الرئيسية|أضف مشروعك|بحث|التصنيفات)$/i.test(text)) return false;
   return true;
@@ -2001,7 +2186,7 @@ function htmlToText(html) {
     .replace(/<script\b[\s\S]*?<\/script>/gi, " ")
     .replace(/<style\b[\s\S]*?<\/style>/gi, " ")
     .replace(/<svg\b[\s\S]*?<\/svg>/gi, " ")
-    .replace(/<(br|\/p|\/div|\/li|\/h[1-6]|\/tr|\/section|\/article|\/blockquote)\b[^>]*>/gi, "\n")
+    .replace(/<(br|\/p|\/div|\/li|\/h[1-6]|\/tr|\/td|\/th|\/dt|\/dd|\/section|\/article|\/blockquote)\b[^>]*>/gi, "\n")
     .replace(/<[^>]+>/g, " "))
     .replace(/[\t\u00a0 ]+/g, " ")
     .replace(/ *\n */g, "\n")
@@ -2130,6 +2315,16 @@ export default {
         return new Response("sent");
       } catch (error) {
         return new Response(String(error), { status: 500 });
+      }
+    }
+
+    // /?key=ADMIN_KEY&probe=<page url> : shows exactly what the Worker receives from a page
+    // (status, challenge detection, visible text and what the parser extracts from it).
+    if (url.searchParams.has("probe")) {
+      try {
+        return Response.json(await probePage(url.searchParams.get("probe")));
+      } catch (error) {
+        return new Response(String(error), { status: 400 });
       }
     }
 
