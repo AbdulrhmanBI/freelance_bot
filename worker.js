@@ -615,9 +615,31 @@ function parseRequestPost(text) {
 
   const budget = cleanText(clean(buckets.budget)).replace(/^[:：-]\s*/, "");
   const duration = cleanText(clean(buckets.duration));
+
+  // Khamsat channel posts sometimes put the request category beside the buyer name,
+  // or put it on a separate emoji-decorated line. Keep those fields separate so the
+  // notification matches the metadata layout used by the other job sites.
+  const ownerLines = ownerBits.map((value) => String(value || "").trim()).filter(Boolean);
+  const isRequestType = (value) => /^(?:سيرة ذاتية|كتابة(?:\s+وترجمة)?|ترجمة|تصميم(?:\s+جرافيك)?|برمجة(?:\s+وتطوير)?|تسويق(?:\s+إلكتروني)?|فيديو(?:\s+وأنيميشن)?|صوتيات|هندسة(?:\s+وعمارة)?|أعمال(?:\s+وخدمات\s+استشارية)?|خدمات\s+استشارية|تدريب\s+وتعليم|تعليم|كتابة\s+محتوى|مواقع\s+إلكترونية|تطبيقات|عروض\s+تقديمية|إدخال\s+بيانات|دعم\s+فني|أخرى)$/i.test(stripPostDecoration(value));
+  let requestType = "";
+  for (let i = 0; i < ownerLines.length; i++) {
+    const segments = ownerLines[i].split(/\s+[•·|]\s+/).map((part) => part.trim()).filter(Boolean);
+    if (segments.length > 1 && isRequestType(segments[segments.length - 1])) {
+      requestType = segments.pop();
+      ownerLines[i] = segments.join(" • ");
+      break;
+    }
+    if (i > 0 && isRequestType(ownerLines[i])) {
+      requestType = ownerLines[i];
+      ownerLines.splice(i, 1);
+      break;
+    }
+  }
+
   return {
     title: title.replace(/^[:：-]\s*/, ""),
-    owner: ownerBits.join(" • "),
+    owner: ownerLines.filter(Boolean).join(" • "),
+    requestType,
     description: cleanText(description).slice(0, 6000),
     budget: /\d/.test(budget) ? budget.slice(0, 65) : "",
     duration: duration && duration.length <= 40 ? duration : "",
@@ -649,7 +671,11 @@ function buildKhamsatItems(posts) {
       description: normalizeDescription(parsed.description, title, 3),
       budget: parsed.budget,
       skills: [],
-      extra: [parsed.owner ? `صاحب الطلب: ${parsed.owner}` : "", parsed.duration ? `المدة: ${parsed.duration}` : ""].filter(Boolean),
+      extra: [
+        parsed.owner ? `صاحب الطلب: ${parsed.owner}` : "",
+        parsed.requestType ? `نوع الطلب: ${parsed.requestType}` : "",
+        parsed.duration ? `المدة: ${parsed.duration}` : "",
+      ].filter(Boolean),
       source: "khamsat-telegram",
       debug: { mode: useRequestIds ? "request-id-from-link" : "telegram-message-id", messageId: post.messageId },
     };
