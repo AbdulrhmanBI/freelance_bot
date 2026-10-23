@@ -4,6 +4,7 @@
 // Required bindings/secrets:
 //   DB (D1), BOT_TOKEN, WEBHOOK_SECRET, ADMIN_KEY; ADMIN_ID optional
 // Cron: * * * * *
+// Telegram UI: dynamic clickable profile greeting + /settings inline menu.
 // Freelancer source: supported time_updated sort, newest-first, original submission age <= 15 minutes.
 // =====================================================================
 
@@ -35,6 +36,7 @@ const SCHEMA = [
    )`,
   "CREATE TABLE IF NOT EXISTS messages (key TEXT PRIMARY KEY, text TEXT NOT NULL, created_at INTEGER NOT NULL)",
   "CREATE TABLE IF NOT EXISTS outbox (id INTEGER PRIMARY KEY AUTOINCREMENT, chat_id INTEGER NOT NULL, msg_key TEXT NOT NULL)",
+  "CREATE TABLE IF NOT EXISTS user_input_state (chat_id INTEGER PRIMARY KEY, action TEXT NOT NULL, updated_at INTEGER NOT NULL)",
   "CREATE INDEX IF NOT EXISTS idx_outbox_chat ON outbox(chat_id)",
   "CREATE INDEX IF NOT EXISTS idx_users_active ON users(active)",
 ];
@@ -685,32 +687,124 @@ async function flushOutbox(env) {
 // Telegram commands/webhook
 // ---------------------------------------------------------------------
 const HELP = [
-  "أهلاً 👋 البوت ده بيبعتلك المشاريع الجديدة من مواقع العمل الحر.",
+  "أهلاً بيك في Freelance Bot",
   "",
-  "المواقع: كفيل، مستقل، نفذلي، خمسات، وFreelancer.",
+  "تابع مشاريع العمل الحر من مكان واحد، واستقبل إشعارات بالمشاريع الجديدة من المنصات اللي تختارها.",
   "",
-  "الأوامر:",
-  "/sites - اختيار المواقع",
-  "/sites all - تفعيل كل المواقع مرة واحدة",
-  "/keywords python, بوت, تصميم - فلترة بالكلمات",
-  "/keywords clear - مسح فلتر الكلمات",
-  "/status - إعداداتك الحالية",
-  "/stop - إيقاف الإشعارات",
-  "/start - تشغيل الإشعارات",
+  "المنصات",
+  "Kafiil | Mostaql | Nafezly | Khamsat | Freelancer",
   "",
-  "من غير كلمات مفتاحية هتوصلك كل المشاريع من المواقع المفعّلة.",
+  "تم تفعيل الإشعارات. تقدر تخصص إعداداتك من خلال /settings.",
 ].join("\n");
+
+function welcomeMessage(from) {
+  const id = Number(from?.id);
+  const first = String(from?.first_name || "").trim();
+  const last = String(from?.last_name || "").trim();
+  const username = String(from?.username || "").trim();
+  const displayName = [first, last].filter(Boolean).join(" ") || (username ? `@${username}` : "مستخدم تيليجرام");
+  const nameMarkup = Number.isSafeInteger(id) && id > 0
+    ? `<a href="tg://user?id=${id}">${esc(displayName)}</a>`
+    : esc(displayName);
+
+  return [
+    `أهلاً فيك ${nameMarkup} في Freelance Bot`,
+    "",
+    "تابع مشاريع العمل الحر من مكان واحد، واستقبل إشعارات بالمشاريع الجديدة من المنصات اللي تختارها.",
+    "",
+    "<b>المنصات</b>",
+    "Kafiil | Mostaql | Nafezly | Khamsat | Freelancer",
+    "",
+    "تم تفعيل الإشعارات. تقدر تخصص إعداداتك من خلال /settings.",
+  ].join("\n");
+}
+
+function settingsKeyboard(user) {
+  return {
+    inline_keyboard: [
+      [
+        { text: "اختيار المنصات", callback_data: "settings:sites" },
+        { text: "الكلمات المفتاحية", callback_data: "settings:keywords" },
+      ],
+      [{ text: user.active ? "إيقاف الإشعارات" : "تشغيل الإشعارات", callback_data: "settings:toggle" }],
+      [{ text: "عرض إعداداتي الحالية", callback_data: "settings:status" }],
+    ],
+  };
+}
+
+function settingsText(user) {
+  const selected = parseSites(user.sites);
+  const names = selected.map((key) => SITES.find((site) => site.key === key)?.name).filter(Boolean);
+  const keywordText = user.keywords
+    ? esc(user.keywords.split(",").join("، "))
+    : "غير محددة (استقبال كل المشاريع)";
+  return [
+    "<b>إعدادات Freelance Bot</b>",
+    "",
+    `حالة الإشعارات: <b>${user.active ? "مفعّلة" : "متوقفة"}</b>`,
+    `المنصات المفعّلة: ${names.length ? esc(names.join("، ")) : "لا توجد منصات مفعّلة"}`,
+    `الكلمات المفتاحية: ${keywordText}`,
+    "",
+    "اختار الإعداد اللي عايز تغيّره.",
+  ].join("\n");
+}
+
+function sitesSettingsText(user) {
+  return [
+    "<b>اختيار المنصات</b>",
+    "اضغط على المنصة لتفعيلها أو إيقافها.",
+    "",
+    settingsSelectionSummary(user),
+  ].join("\n");
+}
+
+function settingsSelectionSummary(user) {
+  const selected = new Set(parseSites(user.sites));
+  return SITES.map((site) => `${esc(site.name)}: ${selected.has(site.key) ? "مفعّلة" : "متوقفة"}`).join("\n");
+}
 
 async function handleUpdate(env, update) {
   if (update.callback_query) return handleCallback(env, update.callback_query);
   const msg = update.message;
-  if (!msg || !msg.text || msg.chat?.type !== "private") return;
+  if (!msg || typeof msg.text !== "string" || msg.chat?.type !== "private") return;
 
   const chatId = msg.chat.id;
+  const from = msg.from || {};
   const text = msg.text.trim();
   const first = text.split(/\s+/)[0] || "";
   const command = first.toLowerCase().replace(/@.*$/, "");
   const args = text.slice(first.length).trim();
+
+  if (command === "/cancel") {
+    await clearPendingInput(env, chatId);
+    const user = await getOrCreateUser(env, chatId);
+    return sendMessage(env, chatId, "تم إلغاء تعديل الكلمات المفتاحية.", { reply_markup: settingsKeyboard(user) });
+  }
+
+  // When the user has pressed the keywords button, accept their next plain-text message.
+  // Slash commands still work normally while waiting for input.
+  if (!text.startsWith("/")) {
+    const pending = await getPendingInput(env, chatId);
+    if (pending?.action === "keywords") {
+      const lowered = text.toLocaleLowerCase();
+      if (/^(clear|مسح|إلغاء الفلتر|الغاء الفلتر)$/i.test(lowered)) {
+        await env.DB.prepare("UPDATE users SET keywords = '' WHERE chat_id = ?1").bind(chatId).run();
+        await clearPendingInput(env, chatId);
+        const user = await getOrCreateUser(env, chatId);
+        return sendMessage(env, chatId, "تم مسح فلتر الكلمات. هتوصلك كل المشاريع من المنصات المفعّلة.", { reply_markup: settingsKeyboard(user) });
+      }
+      const list = [...new Set(
+        text.split(/[,،\n]/).map((value) => value.trim().toLocaleLowerCase().slice(0, 30)).filter(Boolean)
+      )].slice(0, MAX_KEYWORDS);
+      if (!list.length) {
+        return sendMessage(env, chatId, "ما وصلنيش أي كلمات. ابعت الكلمات مفصولة بفواصل، أو /cancel للإلغاء.");
+      }
+      await env.DB.prepare("UPDATE users SET keywords = ?1 WHERE chat_id = ?2").bind(list.join(","), chatId).run();
+      await clearPendingInput(env, chatId);
+      const user = await getOrCreateUser(env, chatId);
+      return sendMessage(env, chatId, `تم تحديث الكلمات المفتاحية: ${esc(list.join("، "))}`, { reply_markup: settingsKeyboard(user) });
+    }
+  }
 
   switch (command) {
     case "/start": {
@@ -718,91 +812,182 @@ async function handleUpdate(env, update) {
         "INSERT INTO users (chat_id, active, sites, keywords, created_at) VALUES (?1, 1, ?2, '', ?3) " +
         "ON CONFLICT(chat_id) DO UPDATE SET active = 1"
       ).bind(chatId, DEFAULT_SITES, Math.floor(Date.now() / 1000)).run());
-      return sendMessage(env, chatId, `${HELP}\n\n✅ تم تفعيل الإشعارات. لو عايز كل المواقع بما فيها Freelancer ابعت /sites all`);
+      const user = await getOrCreateUser(env, chatId);
+      return sendMessage(env, chatId, welcomeMessage(from), { reply_markup: settingsKeyboard(user) });
     }
     case "/stop": {
       await withSchema(env, () => env.DB.prepare("UPDATE users SET active = 0 WHERE chat_id = ?1").bind(chatId).run());
-      return sendMessage(env, chatId, "⏸ تم إيقاف الإشعارات. ابعت /start وقت ما تحب ترجع.");
+      const user = await getOrCreateUser(env, chatId);
+      return sendMessage(env, chatId, "تم إيقاف الإشعارات. تقدر تشغيلها مرة تانية من /settings أو /start.", { reply_markup: settingsKeyboard(user) });
+    }
+    case "/settings": {
+      const user = await getOrCreateUser(env, chatId);
+      return sendMessage(env, chatId, settingsText(user), { reply_markup: settingsKeyboard(user) });
     }
     case "/sites": {
       const user = await getOrCreateUser(env, chatId);
       if (/^(all|كلها|الكل)$/i.test(args)) {
-        await env.DB.prepare("UPDATE users SET sites = ?1, active = 1 WHERE chat_id = ?2")
+        await env.DB.prepare("UPDATE users SET sites = ?1 WHERE chat_id = ?2")
           .bind(DEFAULT_SITES, chatId).run();
-        return sendMessage(env, chatId, "✅ تم تفعيل كل المواقع الخمسة، ومنها نفذلي وFreelancer.", {
-          reply_markup: sitesKeyboard(SITE_KEYS),
-        });
+        const refreshed = await getOrCreateUser(env, chatId);
+        return sendMessage(env, chatId, "تم تفعيل كل المنصات الخمسة.", { reply_markup: sitesKeyboard(parseSites(refreshed.sites)) });
       }
-      return sendMessage(env, chatId, "اختار المواقع اللي عايز تتابعها، أو ابعت /sites all لتفعيلها كلها:", {
-        reply_markup: sitesKeyboard(parseSites(user.sites)),
-      });
+      return sendMessage(env, chatId, sitesSettingsText(user), { reply_markup: sitesKeyboard(parseSites(user.sites)) });
     }
     case "/keywords": {
       const user = await getOrCreateUser(env, chatId);
       if (!args) {
-        const current = user.keywords ? esc(user.keywords.split(",").join("، ")) : "مفيش (بتوصلك كل المشاريع)";
-        return sendMessage(env, chatId, `🔎 كلماتك الحالية: ${current}\n\nلتغييرها: /keywords python, بوت, تصميم\nلمسحها: /keywords clear`);
+        const current = user.keywords ? esc(user.keywords.split(",").join("، ")) : "غير محددة (استقبال كل المشاريع)";
+        return sendMessage(env, chatId, `الكلمات المفتاحية الحالية: ${current}\n\nاستخدم /keywords python, بوت, تصميم لتغييرها.\nاستخدم /keywords clear لمسح الفلتر.`, { reply_markup: settingsKeyboard(user) });
       }
       if (/^(clear|مسح)$/i.test(args)) {
         await env.DB.prepare("UPDATE users SET keywords = '' WHERE chat_id = ?1").bind(chatId).run();
-        return sendMessage(env, chatId, "🧹 اتمسحت الكلمات. هتوصلك كل المشاريع.");
+        const refreshed = await getOrCreateUser(env, chatId);
+        return sendMessage(env, chatId, "تم مسح فلتر الكلمات. هتوصلك كل المشاريع.", { reply_markup: settingsKeyboard(refreshed) });
       }
       const list = [...new Set(args.split(/[,،\n]/).map((value) => value.trim().toLocaleLowerCase().slice(0, 30)).filter(Boolean))].slice(0, MAX_KEYWORDS);
       await env.DB.prepare("UPDATE users SET keywords = ?1 WHERE chat_id = ?2").bind(list.join(","), chatId).run();
-      return sendMessage(env, chatId, `✅ هتوصلك المشاريع اللي فيها واحدة من: ${esc(list.join("، "))}\n(الفلتر بيدور في العنوان والوصف والمهارات)`);
+      const refreshed = await getOrCreateUser(env, chatId);
+      return sendMessage(env, chatId, `تم تحديث الكلمات المفتاحية: ${esc(list.join("، "))}`, { reply_markup: settingsKeyboard(refreshed) });
     }
     case "/status": {
       const user = await getOrCreateUser(env, chatId);
-      const selected = parseSites(user.sites);
-      const names = selected.map((key) => SITES.find((site) => site.key === key)?.name).filter(Boolean);
-      return sendMessage(env, chatId, [
-        `الحالة: ${user.active ? "✅ شغال" : "⏸ متوقف"}`,
-        `المواقع: ${names.length ? names.join("، ") : "مفيش"}`,
-        `الكلمات: ${user.keywords ? esc(user.keywords.split(",").join("، ")) : "مفيش (كل المشاريع)"}`,
-      ].join("\n"));
+      return sendMessage(env, chatId, settingsText(user), { reply_markup: settingsKeyboard(user) });
     }
     case "/stats": {
       if (!env.ADMIN_ID || String(chatId) !== String(env.ADMIN_ID)) return;
       const row = await env.DB.prepare("SELECT COUNT(*) AS total, COALESCE(SUM(active), 0) AS active FROM users").first();
-      return sendMessage(env, chatId, `👥 المستخدمين: ${row.total} (نشطين: ${row.active})`);
+      return sendMessage(env, chatId, `المستخدمون: ${row.total} (النشطون: ${row.active})`);
     }
     case "/help":
-    default:
-      return sendMessage(env, chatId, HELP);
+    default: {
+      const user = await getOrCreateUser(env, chatId);
+      return sendMessage(env, chatId, HELP, { reply_markup: settingsKeyboard(user) });
+    }
   }
 }
 
 async function handleCallback(env, callback) {
   const chatId = callback.message?.chat?.id;
   try {
-    if (chatId && String(callback.data || "").startsWith("t:")) {
-      const key = callback.data.slice(2);
+    const data = String(callback.data || "");
+    if (!chatId) return;
+
+    // Backward-compatible site toggles from the older /sites keyboard.
+    if (data.startsWith("t:")) {
+      const key = data.slice(2);
       if (SITE_KEYS.includes(key)) {
         const user = await getOrCreateUser(env, chatId);
         const selected = new Set(parseSites(user.sites));
         if (selected.has(key)) selected.delete(key); else selected.add(key);
         const nextSites = SITE_KEYS.filter((siteKey) => selected.has(siteKey));
         await env.DB.prepare("UPDATE users SET sites = ?1 WHERE chat_id = ?2").bind(nextSites.join(","), chatId).run();
-        await tg(env, "editMessageReplyMarkup", {
+        const refreshed = await getOrCreateUser(env, chatId);
+        await tg(env, "editMessageText", {
           chat_id: chatId,
           message_id: callback.message.message_id,
-          reply_markup: sitesKeyboard(nextSites),
+          text: sitesSettingsText(refreshed),
+          parse_mode: "HTML",
+          reply_markup: sitesKeyboard(parseSites(refreshed.sites)),
         });
       }
+      return;
+    }
+
+    if (!data.startsWith("settings:")) return;
+    const action = data.slice("settings:".length);
+    // Leaving the keyword-entry screen cancels any pending text input.
+    if (action !== "keywords") await clearPendingInput(env, chatId);
+    let user = await getOrCreateUser(env, chatId);
+    const edit = async (text, replyMarkup) => tg(env, "editMessageText", {
+      chat_id: chatId,
+      message_id: callback.message.message_id,
+      text,
+      parse_mode: "HTML",
+      disable_web_page_preview: true,
+      reply_markup: replyMarkup,
+    });
+
+    if (action === "home") {
+      await edit(settingsText(user), settingsKeyboard(user));
+    } else if (action === "sites") {
+      await edit(sitesSettingsText(user), sitesKeyboard(parseSites(user.sites)));
+    } else if (action.startsWith("site:")) {
+      const key = action.slice("site:".length);
+      if (SITE_KEYS.includes(key)) {
+        const selected = new Set(parseSites(user.sites));
+        if (selected.has(key)) selected.delete(key); else selected.add(key);
+        const nextSites = SITE_KEYS.filter((siteKey) => selected.has(siteKey));
+        await env.DB.prepare("UPDATE users SET sites = ?1 WHERE chat_id = ?2").bind(nextSites.join(","), chatId).run();
+        user = await getOrCreateUser(env, chatId);
+      }
+      await edit(sitesSettingsText(user), sitesKeyboard(parseSites(user.sites)));
+    } else if (action === "sites:all") {
+      await env.DB.prepare("UPDATE users SET sites = ?1 WHERE chat_id = ?2").bind(DEFAULT_SITES, chatId).run();
+      user = await getOrCreateUser(env, chatId);
+      await edit(sitesSettingsText(user), sitesKeyboard(parseSites(user.sites)));
+    } else if (action === "sites:none") {
+      await env.DB.prepare("UPDATE users SET sites = '' WHERE chat_id = ?1").bind(chatId).run();
+      user = await getOrCreateUser(env, chatId);
+      await edit(sitesSettingsText(user), sitesKeyboard(parseSites(user.sites)));
+    } else if (action === "keywords") {
+      await setPendingInput(env, chatId, "keywords");
+      await edit(
+        "<b>تعديل الكلمات المفتاحية</b>\n\nابعت الكلمات اللي عايز تتابعها، وافصل بينها بفاصلة. مثال: Python, Excel, تصميم\n\nلو عايز تستقبل كل المشاريع بدون فلترة، ابعت clear. للإلغاء ابعت /cancel.",
+        { inline_keyboard: [[{ text: "العودة للإعدادات", callback_data: "settings:home" }]] }
+      );
+    } else if (action === "toggle") {
+      await env.DB.prepare("UPDATE users SET active = CASE WHEN active = 1 THEN 0 ELSE 1 END WHERE chat_id = ?1").bind(chatId).run();
+      user = await getOrCreateUser(env, chatId);
+      await edit(settingsText(user), settingsKeyboard(user));
+    } else if (action === "status") {
+      await edit(settingsText(user), { inline_keyboard: [[{ text: "العودة للإعدادات", callback_data: "settings:home" }]] });
     }
   } catch (error) {
     console.error(`[callback] failed: ${String(error)}`);
+  } finally {
+    await tg(env, "answerCallbackQuery", { callback_query_id: callback.id }).catch(() => {});
   }
-  await tg(env, "answerCallbackQuery", { callback_query_id: callback.id }).catch(() => {});
 }
 
 function sitesKeyboard(selected) {
-  return {
-    inline_keyboard: SITES.map((site) => [{
-      text: `${selected.includes(site.key) ? "✅" : "❌"} ${site.name}`,
-      callback_data: `t:${site.key}`,
-    }]),
-  };
+  const selectedSet = new Set(selected || []);
+  const rows = [];
+  for (let index = 0; index < SITES.length; index += 2) {
+    rows.push(SITES.slice(index, index + 2).map((site) => ({
+      text: `${site.name} — ${selectedSet.has(site.key) ? "مفعّلة" : "متوقفة"}`,
+      callback_data: `settings:site:${site.key}`,
+    })));
+  }
+  rows.push([
+    { text: "تفعيل الكل", callback_data: "settings:sites:all" },
+    { text: "إلغاء الكل", callback_data: "settings:sites:none" },
+  ]);
+  rows.push([{ text: "العودة للإعدادات", callback_data: "settings:home" }]);
+  return { inline_keyboard: rows };
+}
+
+async function setPendingInput(env, chatId, action) {
+  return withSchema(env, () => env.DB.prepare(
+    "INSERT INTO user_input_state (chat_id, action, updated_at) VALUES (?1, ?2, ?3) " +
+    "ON CONFLICT(chat_id) DO UPDATE SET action = excluded.action, updated_at = excluded.updated_at"
+  ).bind(chatId, action, Math.floor(Date.now() / 1000)).run());
+}
+
+async function getPendingInput(env, chatId) {
+  return withSchema(env, async () => {
+    const row = await env.DB.prepare("SELECT action, updated_at FROM user_input_state WHERE chat_id = ?1").bind(chatId).first();
+    if (!row) return null;
+    if (Math.floor(Date.now() / 1000) - Number(row.updated_at) > 15 * 60) {
+      await env.DB.prepare("DELETE FROM user_input_state WHERE chat_id = ?1").bind(chatId).run();
+      return null;
+    }
+    return row;
+  });
+}
+
+async function clearPendingInput(env, chatId) {
+  return withSchema(env, () => env.DB.prepare("DELETE FROM user_input_state WHERE chat_id = ?1").bind(chatId).run());
 }
 
 async function getOrCreateUser(env, chatId) {
@@ -1134,9 +1319,10 @@ export default {
         const commands = await tg(env, "setMyCommands", {
           commands: [
             { command: "start", description: "تشغيل الإشعارات" },
-            { command: "sites", description: "اختيار المواقع" },
-            { command: "keywords", description: "فلتر بالكلمات المفتاحية" },
-            { command: "status", description: "إعداداتي" },
+            { command: "settings", description: "إعدادات البوت" },
+            { command: "sites", description: "اختيار المنصات" },
+            { command: "keywords", description: "تعديل الكلمات المفتاحية" },
+            { command: "status", description: "عرض إعداداتك" },
             { command: "stop", description: "إيقاف الإشعارات" },
             { command: "help", description: "مساعدة" },
           ],
