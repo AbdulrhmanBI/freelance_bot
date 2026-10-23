@@ -607,9 +607,16 @@ async function run(env) {
       }
 
       const haystack = `${full.title || ""} ${full.description || ""} ${(full.skills || []).join(" ")}`.toLocaleLowerCase();
-      const recipients = audience
-        .filter((user) => matchesKeywords(user.keywords, haystack))
-        .map((user) => Number(user.chat_id));
+      const recipients = [];
+      for (const user of audience) {
+        const matchedTerms = matchingKeywordTerms(user.keywords, haystack);
+        if (!String(user.keywords || "").trim() || matchedTerms.length > 0) {
+          recipients.push(Number(user.chat_id));
+          console.log(`[filter] site=${site.key} project=${item.id} chat=${user.chat_id} terms=${String(user.keywords || "<none>")} matched=${matchedTerms.join("|") || "<no filter>"}`);
+        } else {
+          console.log(`[filter] site=${site.key} project=${item.id} chat=${user.chat_id} terms=${String(user.keywords || "")} matched=<none>; skipped`);
+        }
+      }
 
       processed++;
       lastProcessedId = Number(item.id);
@@ -670,7 +677,38 @@ async function flushOutbox(env) {
   const doneIds = [];
   const deferredIds = [];
   const blockedChats = new Set();
+
+  // Re-check each queued notification against the user's CURRENT settings.
+  // This prevents old outbox rows (queued before a keyword change) from bypassing
+  // the newly saved keyword filter or sending from a site the user has disabled.
+  const chatIds = [...new Set(results.map((row) => Number(row.chat_id)).filter(Number.isSafeInteger))];
+  const currentUsersResult = chatIds.length
+    ? await env.DB.prepare(
+        "SELECT chat_id, active, sites, keywords FROM users " +
+        "WHERE chat_id IN (SELECT value FROM json_each(?1))"
+      ).bind(JSON.stringify(chatIds)).all()
+    : { results: [] };
+  const currentUsers = new Map((currentUsersResult.results || []).map((user) => [Number(user.chat_id), user]));
+
   for (const row of results) {
+    const currentUser = currentUsers.get(Number(row.chat_id));
+    const siteKey = String(row.msg_key || "").split(":", 1)[0];
+    const messageSearchText = searchableMessageText(row.text);
+    const matchedTerms = currentUser ? matchingKeywordTerms(currentUser.keywords, messageSearchText) : [];
+    let skipReason = "";
+
+    if (!currentUser) skipReason = "user_not_found";
+    else if (Number(currentUser.active) !== 1) skipReason = "notifications_paused";
+    else if (!parseSites(currentUser.sites).includes(siteKey)) skipReason = "site_disabled";
+    else if (String(currentUser.keywords || "").trim() && matchedTerms.length === 0) skipReason = "current_keywords_not_matched";
+
+    if (skipReason) {
+      // Drop stale queued notices instead of sending them under obsolete settings.
+      doneIds.push(row.id);
+      console.log(`[outbox] skipped id=${row.id} chat=${row.chat_id} key=${row.msg_key} reason=${skipReason}`);
+      continue;
+    }
+
     try {
       await sendMessage(env, row.chat_id, row.text);
       doneIds.push(row.id);
@@ -1472,6 +1510,7 @@ async function handleCallback(env, callback) {
       );
     } else if (action === "keywords:clear") {
       await env.DB.prepare("UPDATE users SET keywords = '' WHERE chat_id = ?1").bind(chatId).run();
+      console.log(`[keywords] cleared chat=${chatId}; future queued messages are evaluated with no filter`);
       await clearPendingInput(env, chatId);
       await deleteBotSetting(env, `keyword_draft:${chatId}`);
       user = await getOrCreateUser(env, chatId);
@@ -1487,6 +1526,7 @@ async function handleCallback(env, callback) {
         await edit("لا توجد كلمات معلّقة للحفظ. لم تتغير إعداداتك.", settingsKeyboard(user));
       } else {
         await env.DB.prepare("UPDATE users SET keywords = ?1 WHERE chat_id = ?2").bind(draft.join(","), chatId).run();
+        console.log(`[keywords] saved chat=${chatId} terms=${draft.join("|")}; queued messages will be rechecked before send`);
         await clearPendingInput(env, chatId);
         await deleteBotSetting(env, `keyword_draft:${chatId}`);
         user = await getOrCreateUser(env, chatId);
@@ -1695,10 +1735,39 @@ function parseSites(value) {
   return String(value || "").split(",").map((site) => site.trim()).filter((site) => SITE_KEYS.includes(site));
 }
 
+function matchingKeywordTerms(keywords, haystack) {
+  const terms = String(keywords || "")
+    .split(",")
+    .map((term) => term.trim().toLocaleLowerCase())
+    .filter(Boolean);
+  const text = String(haystack || "").toLocaleLowerCase();
+
+  return terms.filter((term) => {
+    // For simple English/numeric keywords, use word boundaries so "bot" does not
+    // match an unrelated word such as "robotics" or "bottom". Multi-word terms
+    // and terms containing punctuation are still supported.
+    if (/^[a-z0-9]+(?:\s+[a-z0-9]+)*$/i.test(term)) {
+      const escaped = term.split(/\s+/).map((part) => part.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")).join("\\s+");
+      const pattern = new RegExp(`(^|[^a-z0-9])${escaped}($|[^a-z0-9])`, "i");
+      return pattern.test(text);
+    }
+    return text.includes(term);
+  });
+}
+
 function matchesKeywords(keywords, haystack) {
-  const terms = String(keywords || "").split(",").map((term) => term.trim().toLocaleLowerCase()).filter(Boolean);
-  if (!terms.length) return true;
-  return terms.some((term) => haystack.includes(term));
+  return matchingKeywordTerms(keywords, haystack).length > 0;
+}
+
+function searchableMessageText(html) {
+  // Exclude project URLs from keyword matching; URL slugs can contain accidental
+  // matches that do not appear in the notification's actual title/description.
+  const withoutLinks = String(html || "").replace(/<a\b[^>]*>[\s\S]*?<\/a>/gi, " ");
+  return decode(withoutLinks.replace(/<[^>]+>/g, " "))
+    .replace(/[\t\u00a0 ]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim()
+    .toLocaleLowerCase();
 }
 
 function meta(html, name) {
