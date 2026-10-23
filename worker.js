@@ -482,7 +482,10 @@ const khamsatSite = {
       extra: item.extra || [],
     };
     try {
-      const response = await fetch(item.url, { headers: HEADERS, redirect: "follow" });
+      const response = await fetch(item.url, {
+        headers: { ...HEADERS, Accept: "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8", Referer: "https://khamsat.com/community/requests" },
+        redirect: "follow",
+      });
       if (!response.ok) {
         console.warn(`[khamsat] detail HTTP ${response.status} for #${item.id}; sending listing title and project link`);
         return fallback;
@@ -651,6 +654,54 @@ function textAfterDescription(plain) {
   return plain;
 }
 
+// Some sites ship the request text only inside a <script> JSON payload (SPA hydration state,
+// __NEXT_DATA__, JSON-LD...) and render nothing readable in the HTML. Look for an object that
+// belongs to this project (same id or same title) and take its longest text-like field.
+function extractDescriptionFromScripts(html, title, id) {
+  const textKeys = /^(?:description|desc|content|body|details?|text|message|brief|summary|request_?details?|full_?description)$/i;
+  const wantedTitle = cleanText(title || "").replace(/\s+/g, " ").toLocaleLowerCase();
+  const candidates = [];
+  const seen = new Set();
+
+  const consider = (node) => {
+    const ownsId = id && Object.values(node).some((value) => typeof value === "number" && value === Number(id));
+    const ownsTitle = wantedTitle && Object.values(node).some((value) => typeof value === "string" && cleanText(value).replace(/\s+/g, " ").toLocaleLowerCase() === wantedTitle);
+    if (!ownsId && !ownsTitle) return;
+    for (const [key, value] of Object.entries(node)) {
+      if (typeof value !== "string" || !textKeys.test(key)) continue;
+      const text = cleanText(value.replace(/<br\s*\/?>/gi, "\n").replace(/<\/(?:p|div|li)>/gi, "\n"));
+      if (text.length >= 15 && text.toLocaleLowerCase() !== wantedTitle) candidates.push(text);
+    }
+  };
+
+  const walk = (node, depth) => {
+    if (!node || typeof node !== "object" || depth > 14 || seen.has(node)) return;
+    seen.add(node);
+    if (Array.isArray(node)) { for (const child of node.slice(0, 300)) walk(child, depth + 1); return; }
+    consider(node);
+    for (const child of Object.values(node)) walk(child, depth + 1);
+  };
+
+  let scanned = 0;
+  for (const match of String(html).matchAll(/<script\b([^>]*)>([\s\S]*?)<\/script>/gi)) {
+    if (++scanned > 80) break;
+    const attrs = match[1] || "";
+    const body = (match[2] || "").trim();
+    if (!body || body.length > 500000 || /\bsrc=/i.test(attrs)) continue;
+    const payloads = [];
+    if (/type=["']application\/(?:[\w.+-]*\+)?json["']/i.test(attrs) || /^[\[{]/.test(body)) payloads.push(body);
+    else {
+      const assignment = body.match(/=\s*(\{[\s\S]*\}|\[[\s\S]*\])\s*;?\s*$/);
+      if (assignment) payloads.push(assignment[1]);
+    }
+    for (const payload of payloads) {
+      try { walk(JSON.parse(payload), 0); } catch (_) { /* not JSON: ignore */ }
+    }
+  }
+  candidates.sort((a, b) => b.length - a.length);
+  return candidates[0] || "";
+}
+
 function parseHtmlProject(siteKey, html, item) {
   const plain = htmlToText(html);
   const jsonLd = extractJsonLd(html);
@@ -681,6 +732,7 @@ function parseHtmlProject(siteKey, html, item) {
       : textAfterAnyLabel(plain, ["تفاصيل المشروع", "وصف المشروع", "قم بوصف المشروع"], ["مهارات مطلوبة", "المهارات المطلوبة", "حالة المشروع", "المدة المتوقعة", "عدد العروض", "أضف عرضك الآن"]);
     accept(inline, "label-inline", 25);
   }
+  if (!description) accept(extractDescriptionFromScripts(html, title, item.id), "script-json", 8);
   accept(jsonLd.description, "json-ld", 25);
   accept(extractLikelyDescription(html, title), "container-heuristic", 25);
   accept(meta(html, "og:description") || meta(html, "description") || meta(html, "twitter:description"), "meta-description-truncated", 25);
@@ -2015,6 +2067,25 @@ async function dryRun() {
   return output;
 }
 
+function parsedIdInHtml(html, id) {
+  return Boolean(id) && String(html).includes(String(id));
+}
+
+// Which <script> blocks carry the project data? Helps decide how to extract it.
+function scriptSummaries(html, title) {
+  const wanted = cleanText(title || "").slice(0, 40);
+  const out = [];
+  for (const match of String(html).matchAll(/<script\b([^>]*)>([\s\S]*?)<\/script>/gi)) {
+    const body = (match[2] || "").trim();
+    if (!body || /\bsrc=/i.test(match[1] || "")) continue;
+    const hasTitle = Boolean(wanted) && body.includes(wanted);
+    if (!hasTitle && out.length >= 3) continue;
+    out.push({ attrs: (match[1] || "").trim().slice(0, 80), length: body.length, containsTitle: hasTitle, head: body.slice(0, 200) });
+    if (out.length >= 8) break;
+  }
+  return out;
+}
+
 const PROBE_HOSTS = ["khamsat.com", "nafezly.com", "mostaql.com", "kafiil.com", "t.me"];
 
 async function probePage(rawUrl) {
@@ -2035,6 +2106,8 @@ async function probePage(rawUrl) {
     cfMitigated: response.headers.get("cf-mitigated"),
     looksLikeChallenge: looksLikeChallenge(html, response),
     htmlHead: html.slice(0, 300),
+    containsProjectId: parsedIdInHtml(html, idMatch ? idMatch[1] : ""),
+    scripts: scriptSummaries(html, parsed.title),
     visibleTextHead: text.slice(0, 1500),
     parsed: { ...parsed, description: truncate(parsed.description || "", 800) },
   };
