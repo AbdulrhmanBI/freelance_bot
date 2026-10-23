@@ -11,6 +11,10 @@ const SEND_BATCH = 30;
 const MAX_KEYWORDS = 20;
 const DEFAULT_SITES = "kafiil,mostaql,nafezly,khamsat,freelancer";
 const MAX_DESCRIPTION = 1800;
+// Freelancer alerts are limited to projects originally submitted in the last 24 hours.
+// Do not use time_updated: an old project can be updated while still being years old.
+const FREELANCER_MAX_AGE_SECONDS = 24 * 60 * 60;
+const FREELANCER_FUTURE_CLOCK_SKEW_SECONDS = 5 * 60;
 
 const HEADERS = {
   "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36",
@@ -71,63 +75,166 @@ const freelancer = {
   name: "Freelancer",
   async list() {
     const base = "https://www.freelancer.com/api/projects/0.1/projects/active/";
-    // IMPORTANT: Do not use reverse_sort=true here. It can reverse the date order
-    // and return older active projects first, causing newly posted projects to be
-    // missing from this small result window. Prefer newest-first and request a
-    // larger first page; fall back to the API default ordering if needed.
-    const urls = [
-      `${base}?limit=50&full_description=true&job_details=true&sort_field=submitdate&reverse_sort=false`,
-      `${base}?limit=50&full_description=true&job_details=true`,
-      `${base}?limit=30&full_description=true&job_details=true&sort_field=submitdate`,
+    const nowAtStart = Math.floor(Date.now() / 1000);
+    const cutoffAtStart = nowAtStart - FREELANCER_MAX_AGE_SECONDS;
+
+    // Freelancer supports from_time as a Unix timestamp (seconds). We also
+    // enforce the same cutoff locally; that guard is what prevents an old,
+    // still-open project from ever being sent if the API ignores the filter.
+    const filteredUrls = [
+      `${base}?limit=50&full_description=true&job_details=true&from_time=${cutoffAtStart}&sort_field=submitdate&reverse_sort=false`,
+      `${base}?limit=50&full_description=true&job_details=true&from_time=${cutoffAtStart}`,
     ];
+
     let lastError = "no successful response";
-    for (const url of urls) {
-      try {
-        const res = await fetch(url, { headers: { ...HEADERS, Accept: "application/json" } });
-        if (!res.ok) {
-          lastError = `HTTP ${res.status}`;
+    let sawValidProjectArray = false;
+    let lastValidProjects = null;
+
+    const convertAndFilter = (projects, attemptLabel) => {
+      const checkedAt = Math.floor(Date.now() / 1000);
+      const cutoff = checkedAt - FREELANCER_MAX_AGE_SECONDS;
+      let rejectedOld = 0;
+      let rejectedMissingDate = 0;
+      let rejectedFutureDate = 0;
+      const recent = [];
+
+      for (const project of projects) {
+        const id = Number(project.id);
+        if (!Number.isSafeInteger(id) || id <= 0) continue;
+
+        // Use original submission time only. Never use time_updated: an old
+        // project can be updated while remaining open for years.
+        const submittedAt = normalizeUnixSeconds(project.time_submitted)
+          ?? normalizeUnixSeconds(project.submitdate);
+
+        if (!submittedAt) {
+          rejectedMissingDate++;
           continue;
         }
-        const data = await res.json();
+        if (submittedAt < cutoff) {
+          rejectedOld++;
+          continue;
+        }
+        if (submittedAt > checkedAt + FREELANCER_FUTURE_CLOCK_SKEW_SECONDS) {
+          rejectedFutureDate++;
+          continue;
+        }
+
+        const currency = project.currency || {};
+        const budgetObject = project.budget || {};
+        let budget = "";
+        if (budgetObject.minimum != null || budgetObject.maximum != null) {
+          const minimum = budgetObject.minimum ?? "?";
+          const maximum = budgetObject.maximum ?? "?";
+          budget = `${currency.sign || ""}${minimum} - ${currency.sign || ""}${maximum}${currency.code ? ` ${currency.code}` : ""}`.trim();
+          if (project.type === "hourly") budget += " (بالساعة)";
+        }
+
+        const extra = [];
+        if (project.bid_stats?.bid_count != null) extra.push(`عدد العروض: ${project.bid_stats.bid_count}`);
+
+        recent.push({
+          id,
+          url: `https://www.freelancer.com/projects/${project.seo_url || id}`,
+          title: cleanText(project.title || `مشروع جديد #${id}`),
+          description: cleanText(project.description || project.preview_description || ""),
+          budget,
+          skills: (project.jobs || []).map((job) => cleanText(job.name || "")).filter(Boolean).slice(0, 8),
+          extra,
+          submittedAt,
+        });
+      }
+
+      console.log(
+        `[freelancer] ${attemptLabel}: raw=${projects.length}; recent24h=${recent.length}; ` +
+        `rejectedOld=${rejectedOld}; missingTimestamp=${rejectedMissingDate}; ` +
+        `futureTimestamp=${rejectedFutureDate}; cutoff=${cutoff}; ` +
+        `sampleDates=${projects.slice(0, 5).map((project) => `${project.id}:${normalizeUnixSeconds(project.time_submitted) ?? normalizeUnixSeconds(project.submitdate) ?? "missing"}`).join(",") || "none"}`
+      );
+      return recent.sort((a, b) => (a.submittedAt - b.submittedAt) || (a.id - b.id));
+    };
+
+    // Try server-side filtering using two supported query variants. If the API
+    // still returns old projects, the local timestamp filter drops them and we
+    // try the alternate query before declaring that no recent projects exist.
+    for (let attempt = 0; attempt < filteredUrls.length; attempt++) {
+      try {
+        const response = await fetch(filteredUrls[attempt], {
+          headers: { ...HEADERS, Accept: "application/json" },
+          redirect: "follow",
+        });
+        if (!response.ok) {
+          lastError = `HTTP ${response.status}`;
+          console.error(`[freelancer] filtered API attempt ${attempt + 1} failed: ${lastError}`);
+          continue;
+        }
+
+        const data = await response.json();
         const projects = data?.result?.projects;
         if (!Array.isArray(projects)) {
           lastError = "API response did not contain result.projects";
+          console.error(`[freelancer] filtered API attempt ${attempt + 1} failed: ${lastError}`);
           continue;
         }
-        console.log(
-          `[freelancer] API response: count=${projects.length}; ` +
-          `ids=${projects.slice(0, 12).map((p) => p.id).join(",") || "none"}`
-        );
-        return projects.map((p) => {
-          const currency = p.currency || {};
-          const budgetObj = p.budget || {};
-          let budget = "";
-          if (budgetObj.minimum != null || budgetObj.maximum != null) {
-            const low = budgetObj.minimum ?? "?";
-            const high = budgetObj.maximum ?? "?";
-            budget = `${currency.sign || ""}${low} - ${currency.sign || ""}${high}${currency.code ? ` ${currency.code}` : ""}`.trim();
-            if (p.type === "hourly") budget += " (بالساعة)";
-          }
-          const extra = [];
-          if (p.bid_stats?.bid_count != null) extra.push(`عدد العروض: ${p.bid_stats.bid_count}`);
-          return {
-            id: Number(p.id),
-            url: `https://www.freelancer.com/projects/${p.seo_url || p.id}`,
-            title: cleanText(p.title || `مشروع جديد #${p.id}`),
-            description: cleanText(p.description || p.preview_description || ""),
-            budget,
-            skills: (p.jobs || []).map((job) => cleanText(job.name || "")).filter(Boolean).slice(0, 8),
-            extra,
-          };
-        }).filter((p) => Number.isSafeInteger(p.id) && p.id > 0);
+
+        sawValidProjectArray = true;
+        lastValidProjects = projects;
+        const recent = convertAndFilter(projects, `filtered API attempt ${attempt + 1}`);
+        if (recent.length > 0) {
+          console.log(`[freelancer] accepted ${recent.length} project(s) published within the last 24 hours`);
+          return recent;
+        }
+        if (projects.length === 0) {
+          console.log("[freelancer] API returned no projects for the recent-time window");
+          return [];
+        }
       } catch (error) {
         lastError = String(error);
+        console.error(`[freelancer] filtered API attempt ${attempt + 1} failed: ${lastError}`);
       }
     }
+
+    // If a valid API response was received but it contained only old projects
+    // or records without timestamps, return none; never fall back to announcing
+    // stale jobs. A plain query is used only when the filtered API requests fail.
+    if (sawValidProjectArray) {
+      console.warn(`[freelancer] no verifiably recent projects; old/undated projects will not be sent`);
+      return [];
+    }
+
+    // Compatibility fallback when from_time requests failed entirely. The local
+    // age check is still applied, so this cannot allow old projects through.
+    try {
+      const fallbackUrl = `${base}?limit=50&full_description=true&job_details=true&sort_field=submitdate&reverse_sort=false`;
+      const response = await fetch(fallbackUrl, {
+        headers: { ...HEADERS, Accept: "application/json" },
+        redirect: "follow",
+      });
+      if (!response.ok) throw new Error(`HTTP ${response.status}`);
+      const data = await response.json();
+      const projects = data?.result?.projects;
+      if (!Array.isArray(projects)) throw new Error("API response did not contain result.projects");
+      const recent = convertAndFilter(projects, "unfiltered fallback");
+      console.log(`[freelancer] unfiltered fallback yielded ${recent.length} project(s) within the last 24 hours`);
+      return recent;
+    } catch (error) {
+      lastError = String(error);
+    }
+
     throw new Error(`Freelancer API failed: ${lastError}`);
   },
 };
 
+// Normalize Freelancer's Unix timestamps. The API normally returns seconds;
+// accept milliseconds defensively in case the response format changes.
+function normalizeUnixSeconds(value) {
+  if (value === null || value === undefined || value === "") return null;
+  let numeric = Number(value);
+  if (!Number.isFinite(numeric) || numeric <= 0) return null;
+  if (numeric > 100000000000) numeric = numeric / 1000;
+  numeric = Math.floor(numeric);
+  return numeric > 0 ? numeric : null;
+}
 
 // Nafezly blocks requests from this Worker with HTTP 403.
 // Its public Telegram channel publishes project title, description, budget, and project link,
@@ -394,7 +501,7 @@ async function run(env) {
     const newestId = items.length ? Math.max(...items.map((item) => Number(item.id))) : null;
     console.log(`[${site.key}] found=${items.length}; storedLastId=${state[site.key] ?? "missing"}; newestId=${newestId ?? "none"}`);
     if (!items.length) {
-      console.warn(`[${site.key}] no project links parsed; state was not changed`);
+      console.warn(`[${site.key}] no eligible projects returned; state was not changed`);
       continue;
     }
 
