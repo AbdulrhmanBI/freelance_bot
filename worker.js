@@ -691,7 +691,7 @@ const HELP = [
   "الأوامر المتاحة في Freelance Bot:",
   "",
   "/settings - إدارة المنصات والكلمات المفتاحية والإشعارات",
-  "/welcome - لوحة تحرير رسالة الترحيب (للأدمن)",
+  "/welcome - لوحة تحرير وترتيب رسالة الترحيب (للأدمن)",
   "/sites - اختيار المنصات",
   "/sites all - تفعيل كل المنصات",
   "/keywords python, Excel - تحديد الكلمات المفتاحية",
@@ -718,28 +718,76 @@ function defaultWelcomeTemplate() {
   };
 }
 
-function welcomePanelKeyboard(hasMedia) {
-  const rows = [
-    [{ text: "Edit welcome text", callback_data: "welcome:edit-text" }],
-    [{ text: hasMedia ? "Change welcome media" : "Add welcome media", callback_data: "welcome:set-media" }],
-  ];
-  if (hasMedia) rows.push([{ text: "Remove welcome media", callback_data: "welcome:remove-media" }]);
-  rows.push([{ text: "Preview welcome", callback_data: "welcome:preview" }]);
-  rows.push([{ text: "Reset to default", callback_data: "welcome:reset" }]);
-  return { inline_keyboard: rows };
+function welcomePanelKeyboard(blocks) {
+  const count = Array.isArray(blocks) ? blocks.length : 0;
+  return {
+    inline_keyboard: [
+      [{ text: "Manage content order", callback_data: "welcome:order" }],
+      [
+        { text: "Add text block", callback_data: "welcome:add-text" },
+        { text: "Add media block", callback_data: "welcome:add-media" },
+      ],
+      [{ text: "Preview welcome", callback_data: "welcome:preview" }],
+      [{ text: "Reset to default", callback_data: "welcome:reset" }],
+    ],
+  };
 }
 
-function welcomePanelText(hasMedia) {
+function welcomePanelText(blocks) {
+  const items = Array.isArray(blocks) ? blocks : [];
+  const brief = items.slice(0, 10).map((block, index) => {
+    if (block.kind === "media") return `${index + 1}. Media (${block.media_type || "file"})`;
+    const text = String(block.text || "").replace(/\s+/g, " ").trim();
+    return `${index + 1}. Text: ${esc(text.slice(0, 44))}${text.length > 44 ? "…" : ""}`;
+  });
   return [
     "<b>Welcome message control panel</b>",
     "",
-    "Edit the welcome text, attach optional media, preview the result, or restore the default.",
+    "Build the welcome message from ordered text and media blocks. Move items up or down to control the exact order shown to users.",
     "",
-    `Text: editable`,
-    `Media: ${hasMedia ? "configured" : "not set"}`,
+    `<b>Content blocks:</b> ${items.length}`,
+    ...(brief.length ? ["", ...brief] : []),
     "",
-    "Use #name_link anywhere in the text to insert the user's clickable Telegram profile name.",
+    "Use #name_link in any text block to insert the recipient's clickable Telegram profile name.",
   ].join("\n");
+}
+
+function welcomeOrderText(blocks) {
+  const items = Array.isArray(blocks) ? blocks : [];
+  if (!items.length) return "<b>Welcome content order</b>\n\nNo content blocks yet. Add a text or media block.";
+  const lines = items.map((block, index) => {
+    if (block.kind === "media") return `${index + 1}. <b>Media</b> — ${esc(block.media_type || "file")}${block.caption ? " (caption)" : ""}`;
+    const compact = esc(String(block.text || "").replace(/\s+/g, " ").trim().slice(0, 70));
+    return `${index + 1}. <b>Text</b> — ${compact || "(empty text)"}`;
+  });
+  return [
+    "<b>Welcome content order</b>",
+    "Move each block up or down. Edit or delete any block. This order is the order users receive it in.",
+    "",
+    ...lines,
+  ].join("\n");
+}
+
+function welcomeOrderKeyboard(blocks) {
+  const items = Array.isArray(blocks) ? blocks : [];
+  const rows = [];
+  items.forEach((block, index) => {
+    const label = block.kind === "media" ? `Media ${index + 1}` : `Text ${index + 1}`;
+    const row = [];
+    if (index > 0) row.push({ text: `↑ ${index + 1}`, callback_data: `welcome:up:${index}` });
+    if (index < items.length - 1) row.push({ text: `↓ ${index + 1}`, callback_data: `welcome:down:${index}` });
+    if (block.kind === "text") row.push({ text: `Edit ${index + 1}`, callback_data: `welcome:edit-text:${index}` });
+    else row.push({ text: `Replace ${index + 1}`, callback_data: `welcome:edit-media:${index}` });
+    row.push({ text: `Delete ${index + 1}`, callback_data: `welcome:delete:${index}` });
+    // Keep each row at Telegram's supported practical width.
+    rows.push(row);
+  });
+  rows.push([
+    { text: "Add text block", callback_data: "welcome:add-text" },
+    { text: "Add media block", callback_data: "welcome:add-media" },
+  ]);
+  rows.push([{ text: "Back to welcome panel", callback_data: "welcome:panel" }]);
+  return { inline_keyboard: rows };
 }
 
 function isAdmin(env, chatId) {
@@ -788,6 +836,88 @@ async function getWelcomeMedia(env) {
     console.error(`[welcome] invalid stored media template: ${String(error)}`);
   }
   return null;
+}
+
+function normalizeWelcomeContent(value) {
+  if (!Array.isArray(value)) return null;
+  const blocks = [];
+  for (const block of value) {
+    if (!block || typeof block !== "object") continue;
+    if (block.kind === "text" && typeof block.text === "string") {
+      blocks.push({
+        kind: "text",
+        text: block.text.slice(0, 4000),
+        entities: Array.isArray(block.entities) ? block.entities : [],
+      });
+    } else if (block.kind === "media" && typeof block.file_id === "string" && typeof block.media_type === "string") {
+      blocks.push({
+        kind: "media",
+        media_type: block.media_type,
+        file_id: block.file_id,
+        caption: typeof block.caption === "string" ? block.caption.slice(0, 1024) : "",
+        caption_entities: Array.isArray(block.caption_entities) ? block.caption_entities : [],
+      });
+    }
+  }
+  return blocks.slice(0, 20);
+}
+
+async function getWelcomeContent(env) {
+  const raw = await getBotSetting(env, "welcome_content");
+  if (raw) {
+    try {
+      const content = normalizeWelcomeContent(JSON.parse(raw));
+      if (content) return content;
+    } catch (error) {
+      console.error(`[welcome] invalid content order: ${String(error)}`);
+    }
+  }
+
+  // Migrate older installations with the previous single-text/single-media settings.
+  // The previous sender displayed media before the text, so retain that order.
+  const content = [];
+  const legacyMedia = await getWelcomeMedia(env);
+  const rawText = await getBotSetting(env, "welcome_text");
+  if (legacyMedia) {
+    content.push({
+      kind: "media",
+      media_type: legacyMedia.type,
+      file_id: legacyMedia.file_id,
+      caption: "",
+      caption_entities: [],
+    });
+  }
+  let template = defaultWelcomeTemplate();
+  if (rawText) {
+    try {
+      const parsed = JSON.parse(rawText);
+      if (parsed && typeof parsed.text === "string") {
+        template = { text: parsed.text, entities: Array.isArray(parsed.entities) ? parsed.entities : [] };
+      }
+    } catch (_) {}
+  }
+  content.push({ kind: "text", text: template.text, entities: template.entities || [] });
+  return content;
+}
+
+async function saveWelcomeContent(env, blocks) {
+  const safe = normalizeWelcomeContent(blocks) || [];
+  await setBotSetting(env, "welcome_content", JSON.stringify(safe));
+  return safe;
+}
+
+function welcomeTextBlock(text, entities) {
+  return { kind: "text", text: String(text || "").slice(0, 4000), entities: Array.isArray(entities) ? entities : [] };
+}
+
+function welcomeMediaBlock(media, caption = "", captionEntities = []) {
+  return {
+    kind: "media",
+    media_type: media.type,
+    file_id: media.file_id,
+    caption: String(caption || "").slice(0, 1024),
+    caption_entities: Array.isArray(captionEntities) ? captionEntities : [],
+  };
 }
 
 function renderWelcomeTemplate(template, from) {
@@ -854,50 +984,56 @@ function getWelcomeMediaInfo(message) {
   return null;
 }
 
-async function sendWelcomeMedia(env, chatId, media, caption = null) {
-  if (!media) return;
+async function sendWelcomeMediaBlock(env, chatId, block, from) {
+  const type = block.media_type;
   const methodByType = {
     photo: "sendPhoto", animation: "sendAnimation", video: "sendVideo", document: "sendDocument",
     audio: "sendAudio", voice: "sendVoice", video_note: "sendVideoNote", sticker: "sendSticker",
   };
-  const method = methodByType[media.type];
-  if (!method) throw new Error(`Unsupported welcome media type: ${media.type}`);
-  const payload = { chat_id: chatId, [media.type]: media.file_id };
+  const method = methodByType[type];
+  if (!method) throw new Error(`Unsupported welcome media type: ${type}`);
+  const payload = { chat_id: chatId, [type]: block.file_id };
   const captionTypes = new Set(["photo", "animation", "video", "document", "audio", "voice"]);
-  if (caption && captionTypes.has(media.type) && caption.text.length <= 1024) {
-    payload.caption = caption.text;
-    payload.caption_entities = caption.entities;
+  let captionRendered = null;
+  if (block.caption && captionTypes.has(type)) {
+    captionRendered = renderWelcomeTemplate({ text: block.caption, entities: block.caption_entities || [] }, from);
+    if (captionRendered.text.length <= 1024) {
+      payload.caption = captionRendered.text;
+      payload.caption_entities = captionRendered.entities;
+    }
   }
   await tg(env, method, payload);
+  // A media caption is limited by Telegram; if it ever cannot be attached, preserve it as a text block after media.
+  if (block.caption && captionTypes.has(type) && !payload.caption) {
+    await tg(env, "sendMessage", {
+      chat_id: chatId,
+      text: captionRendered.text,
+      entities: captionRendered.entities,
+      disable_web_page_preview: true,
+    });
+  }
 }
 
 async function sendWelcome(env, chatId, from) {
-  const [template, media] = await Promise.all([getWelcomeTemplate(env), getWelcomeMedia(env)]);
-  const rendered = renderWelcomeTemplate(template, from);
-  if (media) {
-    const captionTypes = new Set(["photo", "animation", "video", "document", "audio", "voice"]);
-    const canUseCaption = captionTypes.has(media.type) && rendered.text.length <= 1024;
+  const blocks = await getWelcomeContent(env);
+  for (const block of blocks) {
     try {
-      // Caption-capable media is combined with the personalized text in one Telegram
-      // message. Stickers/video notes cannot have captions, so send them before the text.
-      await sendWelcomeMedia(env, chatId, media, canUseCaption ? rendered : null);
-      if (canUseCaption) return;
-    } catch (error) {
-      console.error(`[welcome] media send failed: ${String(error)}`);
-      // If the caption caused the failure, make a second attempt without the caption.
-      try {
-        await sendWelcomeMedia(env, chatId, media, null);
-      } catch (mediaError) {
-        console.error(`[welcome] media-only fallback failed: ${String(mediaError)}`);
+      if (block.kind === "media") {
+        await sendWelcomeMediaBlock(env, chatId, block, from);
+      } else if (block.kind === "text") {
+        const rendered = renderWelcomeTemplate(block, from);
+        if (!rendered.text) continue;
+        await tg(env, "sendMessage", {
+          chat_id: chatId,
+          text: rendered.text,
+          entities: rendered.entities,
+          disable_web_page_preview: true,
+        });
       }
+    } catch (error) {
+      console.error(`[welcome] failed to send ${block.kind} block: ${String(error)}`);
     }
   }
-  return tg(env, "sendMessage", {
-    chat_id: chatId,
-    text: rendered.text,
-    entities: rendered.entities,
-    disable_web_page_preview: true,
-  });
 }
 
 function settingsKeyboard(user) {
@@ -949,66 +1085,89 @@ async function handleUpdate(env, update) {
   const first = text.split(/\s+/)[0] || "";
   const command = first.toLowerCase().replace(/@.*$/, "");
   const args = text.slice(first.length).trim();
+  const pending = await getPendingInput(env, chatId);
 
   if (command === "/cancel") {
     await clearPendingInput(env, chatId);
-    if (isAdmin(env, chatId)) {
-      const media = await getWelcomeMedia(env);
-      return sendMessage(env, chatId, "Cancelled.", { reply_markup: welcomePanelKeyboard(Boolean(media)) });
+    if (pending?.action?.startsWith("welcome_")) {
+      const blocks = await getWelcomeContent(env);
+      return sendMessage(env, chatId, "Cancelled. No pending welcome-content changes were saved.", {
+        reply_markup: welcomePanelKeyboard(blocks),
+      });
     }
     const user = await getOrCreateUser(env, chatId);
-    return sendMessage(env, chatId, "تم إلغاء تعديل الكلمات المفتاحية.", { reply_markup: settingsKeyboard(user) });
-  }
-
-  const pending = await getPendingInput(env, chatId);
-  if (pending?.action === "welcome_text" && isAdmin(env, chatId)) {
-    if (!rawText) return sendMessage(env, chatId, "ابعت رسالة نصية للترحيب، أو /cancel للإلغاء.");
-    if (rawText.length > 4000) return sendMessage(env, chatId, "رسالة الترحيب أطول من الحد المسموح. ابعت نصًا أقصر أو /cancel.");
-    const template = { text: rawText, entities: Array.isArray(msg.entities) ? msg.entities : [] };
-    await setBotSetting(env, "welcome_text", JSON.stringify(template));
-    await clearPendingInput(env, chatId);
-    const media = await getWelcomeMedia(env);
-    return sendMessage(env, chatId, "Welcome text saved. The #name_link placeholder will become the recipient's clickable Telegram profile name.", {
-      reply_markup: welcomePanelKeyboard(Boolean(media)),
+    return sendMessage(env, chatId, "Cancelled. Your existing keyword settings were not changed.", {
+      reply_markup: settingsKeyboard(user),
     });
   }
-  if (pending?.action === "welcome_media" && isAdmin(env, chatId)) {
-    const media = getWelcomeMediaInfo(msg);
-    if (!media) {
-      return sendMessage(env, chatId, "Unsupported media. Send a photo, sticker, video, animation/GIF, document, audio, voice message, or video note. Or send /cancel.");
+
+  // Admin is building the ordered welcome content. Supported pending actions:
+  // welcome_text_add, welcome_text_edit:N, welcome_media_add, welcome_media_edit:N.
+  if (isAdmin(env, chatId) && (pending?.action === "welcome_text" || pending?.action?.startsWith("welcome_text_"))) {
+    if (!rawText) return sendMessage(env, chatId, "Please send a text message, or /cancel to leave without changes.");
+    if (rawText.length > 4000) return sendMessage(env, chatId, "Text is longer than Telegram's limit. Send a shorter text or /cancel.");
+    const blocks = await getWelcomeContent(env);
+    const block = welcomeTextBlock(rawText, Array.isArray(msg.entities) ? msg.entities : []);
+    const editMatch = pending.action.match(/^welcome_text_edit:(\d+)$/);
+    if (editMatch) {
+      const index = Number(editMatch[1]);
+      if (index >= 0 && index < blocks.length && blocks[index]?.kind === "text") blocks[index] = block;
+      else blocks.push(block);
+    } else {
+      blocks.push(block);
     }
-    await setBotSetting(env, "welcome_media", JSON.stringify(media));
+    if (blocks.length > 20) return sendMessage(env, chatId, "The welcome message can contain up to 20 content blocks. Delete a block first or send /cancel.");
+    await saveWelcomeContent(env, blocks);
     await clearPendingInput(env, chatId);
-    return sendMessage(env, chatId, "Welcome media saved. It will be sent before the personalized welcome text.", {
-      reply_markup: welcomePanelKeyboard(true),
+    return sendMessage(env, chatId, "Text block saved. Use Manage content order to move it, edit it, or delete it.", {
+      reply_markup: welcomePanelKeyboard(blocks),
     });
   }
 
-  // Text/caption customization and keyword entry must not affect ordinary messages.
+  if (isAdmin(env, chatId) && (pending?.action === "welcome_media" || pending?.action?.startsWith("welcome_media_"))) {
+    const media = getWelcomeMediaInfo(msg);
+    if (!media) return sendMessage(env, chatId, "Send a photo, sticker, video, GIF/animation, document, audio, voice message, or video note. Send /cancel to leave without changes.");
+    if (typeof msg.caption === "string" && msg.caption.length > 1024) {
+      return sendMessage(env, chatId, "Telegram media captions can be at most 1024 characters. Send the media with a shorter caption, or /cancel.");
+    }
+    const blocks = await getWelcomeContent(env);
+    const block = welcomeMediaBlock(media, msg.caption || "", Array.isArray(msg.caption_entities) ? msg.caption_entities : []);
+    const editMatch = pending.action.match(/^welcome_media_edit:(\d+)$/);
+    if (editMatch) {
+      const index = Number(editMatch[1]);
+      if (index >= 0 && index < blocks.length && blocks[index]?.kind === "media") blocks[index] = block;
+      else blocks.push(block);
+    } else {
+      blocks.push(block);
+    }
+    if (blocks.length > 20) return sendMessage(env, chatId, "The welcome message can contain up to 20 content blocks. Delete a block first or send /cancel.");
+    await saveWelcomeContent(env, blocks);
+    await clearPendingInput(env, chatId);
+    return sendMessage(env, chatId, "Media block saved in the current content order. Use Manage content order to move it.", {
+      reply_markup: welcomePanelKeyboard(blocks),
+    });
+  }
+
   if (!text) return;
 
-  // When the user has pressed the keywords button, accept their next plain-text message.
-  // Slash commands still work normally while waiting for input.
-  if (!text.startsWith("/")) {
-    if (pending?.action === "keywords") {
-      const lowered = text.toLocaleLowerCase();
-      if (/^(clear|مسح|إلغاء الفلتر|الغاء الفلتر)$/i.test(lowered)) {
-        await env.DB.prepare("UPDATE users SET keywords = '' WHERE chat_id = ?1").bind(chatId).run();
-        await clearPendingInput(env, chatId);
-        const user = await getOrCreateUser(env, chatId);
-        return sendMessage(env, chatId, "تم مسح فلتر الكلمات. هتوصلك كل المشاريع من المنصات المفعّلة.", { reply_markup: settingsKeyboard(user) });
-      }
-      const list = [...new Set(
-        text.split(/[,،\n]/).map((value) => value.trim().toLocaleLowerCase().slice(0, 30)).filter(Boolean)
-      )].slice(0, MAX_KEYWORDS);
-      if (!list.length) {
-        return sendMessage(env, chatId, "ما وصلنيش أي كلمات. ابعت الكلمات مفصولة بفواصل، أو /cancel للإلغاء.");
-      }
-      await env.DB.prepare("UPDATE users SET keywords = ?1 WHERE chat_id = ?2").bind(list.join(","), chatId).run();
+  // The clear-filter action is intentionally distinct from /cancel:
+  // clear removes the filter and saves that choice; /cancel changes nothing.
+  if (!text.startsWith("/") && pending?.action === "keywords") {
+    const lowered = text.toLocaleLowerCase();
+    if (/^(clear|مسح)$/i.test(lowered)) {
+      await env.DB.prepare("UPDATE users SET keywords = '' WHERE chat_id = ?1").bind(chatId).run();
       await clearPendingInput(env, chatId);
       const user = await getOrCreateUser(env, chatId);
-      return sendMessage(env, chatId, `تم تحديث الكلمات المفتاحية: ${esc(list.join("، "))}`, { reply_markup: settingsKeyboard(user) });
+      return sendMessage(env, chatId, "تم مسح فلتر الكلمات. هتوصلك كل المشاريع من المنصات المفعّلة. لو كنت تقصد إلغاء العملية بدون تغيير، استخدم /cancel.", { reply_markup: settingsKeyboard(user) });
     }
+    const list = [...new Set(
+      text.split(/[,،\n]/).map((value) => value.trim().toLocaleLowerCase().slice(0, 30)).filter(Boolean)
+    )].slice(0, MAX_KEYWORDS);
+    if (!list.length) return sendMessage(env, chatId, "ابعت كلمة واحدة على الأقل مفصولة بفواصل، أو استخدم /cancel للإلغاء بدون تغيير.");
+    await env.DB.prepare("UPDATE users SET keywords = ?1 WHERE chat_id = ?2").bind(list.join(","), chatId).run();
+    await clearPendingInput(env, chatId);
+    const user = await getOrCreateUser(env, chatId);
+    return sendMessage(env, chatId, `تم تحديث الكلمات المفتاحية: ${esc(list.join("، "))}`, { reply_markup: settingsKeyboard(user) });
   }
 
   switch (command) {
@@ -1018,7 +1177,6 @@ async function handleUpdate(env, update) {
         "ON CONFLICT(chat_id) DO UPDATE SET active = 1"
       ).bind(chatId, DEFAULT_SITES, Math.floor(Date.now() / 1000)).run());
       await getOrCreateUser(env, chatId);
-      // The welcome message appears only on /start and intentionally has no inline keyboard.
       return sendWelcome(env, chatId, from);
     }
     case "/stop": {
@@ -1033,8 +1191,7 @@ async function handleUpdate(env, update) {
     case "/sites": {
       const user = await getOrCreateUser(env, chatId);
       if (/^(all|كلها|الكل)$/i.test(args)) {
-        await env.DB.prepare("UPDATE users SET sites = ?1 WHERE chat_id = ?2")
-          .bind(DEFAULT_SITES, chatId).run();
+        await env.DB.prepare("UPDATE users SET sites = ?1 WHERE chat_id = ?2").bind(DEFAULT_SITES, chatId).run();
         const refreshed = await getOrCreateUser(env, chatId);
         return sendMessage(env, chatId, "تم تفعيل كل المنصات الخمسة.", { reply_markup: sitesKeyboard(parseSites(refreshed.sites)) });
       }
@@ -1044,7 +1201,7 @@ async function handleUpdate(env, update) {
       const user = await getOrCreateUser(env, chatId);
       if (!args) {
         const current = user.keywords ? esc(user.keywords.split(",").join("، ")) : "غير محددة (استقبال كل المشاريع)";
-        return sendMessage(env, chatId, `الكلمات المفتاحية الحالية: ${current}\n\nاستخدم /keywords python, بوت, تصميم لتغييرها.\nاستخدم /keywords clear لمسح الفلتر.`, { reply_markup: settingsKeyboard(user) });
+        return sendMessage(env, chatId, `الكلمات المفتاحية الحالية: ${current}\n\nاستخدم /keywords python, بوت, تصميم لتغييرها.\nاستخدم /keywords clear لمسح الفلتر.\nاستخدم /cancel لإلغاء خطوة إدخال الكلمات بدون تغيير.`, { reply_markup: settingsKeyboard(user) });
       }
       if (/^(clear|مسح)$/i.test(args)) {
         await env.DB.prepare("UPDATE users SET keywords = '' WHERE chat_id = ?1").bind(chatId).run();
@@ -1061,25 +1218,17 @@ async function handleUpdate(env, update) {
       return sendMessage(env, chatId, settingsText(user), { reply_markup: settingsKeyboard(user) });
     }
     case "/welcome": {
-      if (!isAdmin(env, chatId)) {
-        return sendMessage(env, chatId, "لوحة التحكم في رسالة الترحيب متاحة للأدمن فقط. اضبط ADMIN_ID على Telegram user ID الخاص بك في إعدادات الـ Worker.");
-      }
-      const media = await getWelcomeMedia(env);
-      return sendMessage(env, chatId, welcomePanelText(Boolean(media)), { reply_markup: welcomePanelKeyboard(Boolean(media)) });
+      if (!isAdmin(env, chatId)) return sendMessage(env, chatId, "Welcome control panel is available to the admin only. Set ADMIN_ID to your Telegram user ID in Worker settings.");
+      const blocks = await getWelcomeContent(env);
+      return sendMessage(env, chatId, welcomePanelText(blocks), { reply_markup: welcomePanelKeyboard(blocks) });
     }
     case "/stats": {
       if (!env.ADMIN_ID || String(chatId) !== String(env.ADMIN_ID)) return;
       const row = await env.DB.prepare("SELECT COUNT(*) AS total, COALESCE(SUM(active), 0) AS active FROM users").first();
       return sendMessage(env, chatId, `المستخدمون: ${row.total} (النشطون: ${row.active})`);
     }
-    case "/help": {
-      return sendMessage(env, chatId, HELP);
-    }
-    default: {
-      // Ignore ordinary text and unknown commands unless the user is entering keywords.
-      // Do not send the welcome message or an inline keyboard for every incoming message.
-      return;
-    }
+    case "/help": return sendMessage(env, chatId, HELP);
+    default: return;
   }
 }
 
@@ -1095,46 +1244,93 @@ async function handleCallback(env, callback) {
         return;
       }
       const action = data.slice("welcome:".length);
-      const panel = async () => {
-        const media = await getWelcomeMedia(env);
-        await tg(env, "editMessageText", {
-          chat_id: chatId,
-          message_id: callback.message.message_id,
-          text: welcomePanelText(Boolean(media)),
-          parse_mode: "HTML",
-          reply_markup: welcomePanelKeyboard(Boolean(media)),
-        });
+      const getContent = () => getWelcomeContent(env);
+      const editMessage = async (text, replyMarkup) => tg(env, "editMessageText", {
+        chat_id: chatId,
+        message_id: callback.message.message_id,
+        text,
+        parse_mode: "HTML",
+        disable_web_page_preview: true,
+        reply_markup: replyMarkup,
+      });
+      const showPanel = async () => {
+        const blocks = await getContent();
+        await editMessage(welcomePanelText(blocks), welcomePanelKeyboard(blocks));
       };
-      if (action === "edit-text") {
-        await setPendingInput(env, chatId, "welcome_text");
-        await tg(env, "editMessageText", {
-          chat_id: chatId,
-          message_id: callback.message.message_id,
-          text: "Send the complete welcome text in your next message. Keep the exact line breaks you want and include #name_link where the clickable profile name should appear. Telegram text formatting/entities are preserved. Use /cancel to cancel.",
-          reply_markup: { inline_keyboard: [[{ text: "Back to welcome panel", callback_data: "welcome:panel" }]] },
-        });
-      } else if (action === "set-media") {
-        await setPendingInput(env, chatId, "welcome_media");
-        await tg(env, "editMessageText", {
-          chat_id: chatId,
-          message_id: callback.message.message_id,
-          text: "Send one photo, sticker, video, animation/GIF, document, audio, voice message, or video note. The media will be sent before the personalized welcome text. Use /cancel to cancel.",
-          reply_markup: { inline_keyboard: [[{ text: "Back to welcome panel", callback_data: "welcome:panel" }]] },
-        });
-      } else if (action === "remove-media") {
-        await deleteBotSetting(env, "welcome_media");
-        await panel();
+      const showOrder = async () => {
+        const blocks = await getContent();
+        await editMessage(welcomeOrderText(blocks), welcomeOrderKeyboard(blocks));
+      };
+
+      if (action === "panel") {
+        await clearPendingInput(env, chatId);
+        await showPanel();
+      } else if (action === "order") {
+        await clearPendingInput(env, chatId);
+        await showOrder();
+      } else if (action === "add-text") {
+        await setPendingInput(env, chatId, "welcome_text_add");
+        await editMessage(
+          "Send the text block you want to add. Preserve your line breaks and use Telegram's formatting tools (bold, italic, links, etc.) before sending. Use #name_link for the clickable profile name. Use /cancel to leave without saving.",
+          { inline_keyboard: [[{ text: "Cancel", callback_data: "welcome:panel" }]] }
+        );
+      } else if (action === "add-media") {
+        await setPendingInput(env, chatId, "welcome_media_add");
+        await editMessage(
+          "Send one photo, sticker, video, GIF/animation, document, audio, voice message, or video note. You may include a caption when Telegram supports it. The block will be appended; you can reorder it afterwards. Use /cancel to leave without saving.",
+          { inline_keyboard: [[{ text: "Cancel", callback_data: "welcome:panel" }]] }
+        );
+      } else if (action.startsWith("edit-text:")) {
+        const index = Number(action.split(":")[1]);
+        const blocks = await getContent();
+        if (!Number.isInteger(index) || !blocks[index] || blocks[index].kind !== "text") {
+          await showOrder();
+        } else {
+          await setPendingInput(env, chatId, `welcome_text_edit:${index}`);
+          await editMessage(
+            `Send the replacement text for block ${index + 1}. Use #name_link for the clickable profile name. Text formatting/entities are preserved. Use /cancel to leave without saving.`,
+            { inline_keyboard: [[{ text: "Cancel", callback_data: "welcome:order" }]] }
+          );
+        }
+      } else if (action.startsWith("edit-media:")) {
+        const index = Number(action.split(":")[1]);
+        const blocks = await getContent();
+        if (!Number.isInteger(index) || !blocks[index] || blocks[index].kind !== "media") {
+          await showOrder();
+        } else {
+          await setPendingInput(env, chatId, `welcome_media_edit:${index}`);
+          await editMessage(
+            `Send replacement media for block ${index + 1}. Send /cancel to leave without saving.`,
+            { inline_keyboard: [[{ text: "Cancel", callback_data: "welcome:order" }]] }
+          );
+        }
+      } else if (/^(up|down):\d+$/.test(action)) {
+        const [direction, indexText] = action.split(":");
+        const index = Number(indexText);
+        const blocks = await getContent();
+        const destination = direction === "up" ? index - 1 : index + 1;
+        if (index >= 0 && index < blocks.length && destination >= 0 && destination < blocks.length) {
+          [blocks[index], blocks[destination]] = [blocks[destination], blocks[index]];
+          await saveWelcomeContent(env, blocks);
+        }
+        await showOrder();
+      } else if (action.startsWith("delete:")) {
+        const index = Number(action.split(":")[1]);
+        const blocks = await getContent();
+        if (Number.isInteger(index) && index >= 0 && index < blocks.length) {
+          blocks.splice(index, 1);
+          await saveWelcomeContent(env, blocks);
+        }
+        await showOrder();
       } else if (action === "reset") {
+        await clearPendingInput(env, chatId);
+        await deleteBotSetting(env, "welcome_content");
         await deleteBotSetting(env, "welcome_text");
         await deleteBotSetting(env, "welcome_media");
-        await clearPendingInput(env, chatId);
-        await panel();
+        await showPanel();
       } else if (action === "preview") {
         await sendWelcome(env, chatId, callback.from || callback.message?.from || {});
-        await panel();
-      } else if (action === "panel") {
-        await clearPendingInput(env, chatId);
-        await panel();
+        await showPanel();
       }
       return;
     }
@@ -1162,7 +1358,7 @@ async function handleCallback(env, callback) {
 
     if (!data.startsWith("settings:")) return;
     const action = data.slice("settings:".length);
-    // Leaving the keyword-entry screen cancels any pending text input.
+    // Keep the pending keyword state only while the user is on its input prompt.
     if (action !== "keywords") await clearPendingInput(env, chatId);
     let user = await getOrCreateUser(env, chatId);
     const edit = async (text, replyMarkup) => tg(env, "editMessageText", {
@@ -1199,9 +1395,22 @@ async function handleCallback(env, callback) {
     } else if (action === "keywords") {
       await setPendingInput(env, chatId, "keywords");
       await edit(
-        "<b>تعديل الكلمات المفتاحية</b>\n\nابعت الكلمات اللي عايز تتابعها، وافصل بينها بفاصلة. مثال: Python, Excel, تصميم\n\nلو عايز تستقبل كل المشاريع بدون فلترة، ابعت clear. للإلغاء ابعت /cancel.",
-        { inline_keyboard: [[{ text: "Back to settings", callback_data: "settings:home" }]] }
+        "<b>تعديل الكلمات المفتاحية</b>\n\nابعت الكلمات اللي عايز تتابعها، وافصل بينها بفاصلة. مثال: Python, Excel, تصميم.\n\nلو عايز تستقبل كل المشاريع، اضغط <b>Clear filter</b> — ده يمسح الفلتر ويحفظ التغيير. لو عايز تلغي العملية بدون ما تغيّر إعداداتك، اضغط <b>Cancel</b>.",
+        { inline_keyboard: [
+          [{ text: "Clear filter", callback_data: "settings:keywords:clear" }],
+          [{ text: "Cancel", callback_data: "settings:keywords:cancel" }],
+          [{ text: "Back to settings", callback_data: "settings:home" }],
+        ] }
       );
+    } else if (action === "keywords:clear") {
+      await env.DB.prepare("UPDATE users SET keywords = '' WHERE chat_id = ?1").bind(chatId).run();
+      await clearPendingInput(env, chatId);
+      user = await getOrCreateUser(env, chatId);
+      await edit("تم مسح فلتر الكلمات. هتوصلك كل المشاريع من المنصات المفعّلة.", settingsKeyboard(user));
+    } else if (action === "keywords:cancel") {
+      await clearPendingInput(env, chatId);
+      user = await getOrCreateUser(env, chatId);
+      await edit(settingsText(user), settingsKeyboard(user));
     } else if (action === "toggle") {
       await env.DB.prepare("UPDATE users SET active = CASE WHEN active = 1 THEN 0 ELSE 1 END WHERE chat_id = ?1").bind(chatId).run();
       user = await getOrCreateUser(env, chatId);
@@ -1587,7 +1796,7 @@ export default {
           commands: [
             { command: "start", description: "تشغيل الإشعارات" },
             { command: "settings", description: "إعدادات البوت" },
-            { command: "welcome", description: "تحرير رسالة الترحيب (للأدمن)" },
+            { command: "welcome", description: "تحرير وترتيب رسالة الترحيب (للأدمن)" },
             { command: "sites", description: "اختيار المنصات" },
             { command: "keywords", description: "تعديل الكلمات المفتاحية" },
             { command: "status", description: "عرض إعداداتك" },
