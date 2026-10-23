@@ -22,13 +22,8 @@ enabled = true
 invocation_logs = true
 persist = true
 
-{
-  // ...
-  "vars": {
-    "ADMIN_ID": "8571353627"
-  },
-  // ...
-}
+[vars]
+ADMIN_ID = "8571353627"
 
 # الـ Secrets بتتضاف بالأوامر دي (مش هنا):
 #   npx wrangler secret put BOT_TOKEN
