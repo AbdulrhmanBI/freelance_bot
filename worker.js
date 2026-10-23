@@ -409,7 +409,10 @@ const SITES = [
 const SITE_KEYS = SITES.map((site) => site.key);
 
 function looksLikeChallenge(html) {
-  return /cf-chl-|challenge-platform|verify you are human|checking your browser|just a moment\.\.\./i.test(String(html).slice(0, 25000));
+  // Some sites (notably Khamsat) return a JS-disabled/anti-bot placeholder
+  // with HTTP 200. Never parse that placeholder as if it were a real project.
+  const source = String(html).slice(0, 50000);
+  return /cf-chl-|challenge-platform|verify you are human|checking your browser|just a moment\.\.\.|javascript\s+is\s+disabled|enable\s+javascript|javascript\s+must\s+be\s+enabled|please\s+enable\s+javascript|access denied/i.test(source);
 }
 
 function parseHtmlProject(siteKey, html, item) {
@@ -1811,6 +1814,8 @@ function cleanTitle(value, siteKey) {
 
 function isGenericTitle(title, siteKey) {
   if (!title) return true;
+  // Titles returned by anti-bot/JavaScript placeholders are not project titles.
+  if (/^(?:javascript is disabled|enable javascript|please enable javascript|just a moment|access denied|checking your browser|verify you are human)$/i.test(String(title).trim())) return true;
   if (siteKey === "khamsat" && /^(?:طلبات الخدمات غير الموجودة|خمسات|المجتمع)(?:\s|$)/i.test(title)) return true;
   return /^(مشروع جديد|project)\s*#?\d+$/i.test(title);
 }
