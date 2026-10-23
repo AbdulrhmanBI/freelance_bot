@@ -1,6 +1,6 @@
 // =====================================================================
 // Freelance Jobs Bot — Cloudflare Workers + Cron + D1
-// Sites: Kafiil, Mostaql, Nafezly (public Telegram feed), Khamsat, Freelancer
+// Sites: Kafiil, Mostaql, Nafezly (public Telegram feed), Khamsat via @KhamsatRequests, Freelancer
 // Fix: keep official nafezly.com project links unchanged; never rewrite their host.
 // Required bindings/secrets:
 //   DB (D1), BOT_TOKEN, WEBHOOK_SECRET, ADMIN_KEY; ADMIN_ID optional
@@ -8,6 +8,7 @@
 // Telegram UI: clickable profile greeting only on /start; all inline buttons are English.
 // v2: precise anti-bot detection (normal pages are no longer discarded), line-based extraction of
 //     Mostaql/Kafiil/Khamsat project details, Telegram 4096-char safety, /?probe=<url> diagnostics.
+// Khamsat source: public Telegram channel preview (full post text), independently tracked IDs.
 // Freelancer source: supported time_updated sort, newest-first, original submission age <= 15 minutes.
 // =====================================================================
 
@@ -413,108 +414,117 @@ function textBetweenLabels(text, startLabel, endLabels) {
 }
 
 
-// Khamsat's detail pages may return a JavaScript-disabled placeholder to Workers.
-// Still publish the real request discovered on the listing page: preserve its ID,
-// use the actual listing anchor text when available, otherwise derive a readable
-// title from the request URL slug. A blocked detail page must never replace the
-// project title with "JavaScript is disabled" or cause the request to disappear.
+// Khamsat requests are sourced from the public Telegram channel instead of Khamsat's
+// project pages, which can return JavaScript/challenge placeholders to Cloudflare Workers.
+// The public t.me/s page contains the full text of each channel post.
 const khamsatSite = {
   key: "khamsat",
   name: "خمسات",
-  base: "https://khamsat.com",
-  listUrl: "https://khamsat.com/community/requests",
+  stateKey: "khamsat_telegram",
+  messageKeyPrefix: "telegram:",
+  feedUrl: "https://t.me/s/KhamsatRequests",
   async list() {
-    const response = await fetch(this.listUrl, { headers: HEADERS, redirect: "follow" });
-    if (!response.ok) throw new Error(`khamsat list HTTP ${response.status}`);
+    const response = await fetch(this.feedUrl, {
+      headers: {
+        ...HEADERS,
+        Accept: "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        Referer: "https://t.me/KhamsatRequests",
+      },
+      redirect: "follow",
+    });
+    if (!response.ok) throw new Error(`khamsat Telegram feed HTTP ${response.status}`);
     const html = await response.text();
-    if (looksLikeChallenge(html, response)) throw new Error("khamsat listing returned a challenge page; no reliable project list available");
+    if (!html.includes("tgme_widget_message")) {
+      throw new Error("khamsat Telegram feed page did not contain public channel posts");
+    }
+
+    // Telegram's public preview uses one tgme_widget_message_wrap per post.
+    // Extract blocks by their opening tags so HTML attributes may appear in any order.
+    const openingTags = [];
+    for (const match of html.matchAll(/<div\b[^>]*>/gi)) {
+      const tag = match[0];
+      if (!/\btgme_widget_message_wrap\b/i.test(getAttribute(tag, "class") || "")) continue;
+      const post = getAttribute(tag, "data-post");
+      if (!post) continue;
+      openingTags.push({ index: match.index, end: match.index + tag.length, post });
+    }
 
     const found = new Map();
-    const anchorRe = /<a\b[^>]*\bhref\s*=\s*(["'])(.*?)\1[^>]*>([\s\S]*?)<\/a>/gi;
-    for (const match of html.matchAll(anchorRe)) {
-      const rawHref = decode(match[2] || "");
-      let url;
-      try { url = new URL(rawHref, this.base); } catch { continue; }
-      const idMatch = url.pathname.match(/^\/community\/requests\/(\d+)(?:-|$)/);
+    for (let i = 0; i < openingTags.length; i++) {
+      const current = openingTags[i];
+      const nextIndex = openingTags[i + 1]?.index ?? html.length;
+      const block = html.slice(current.end, nextIndex);
+      const idMatch = String(current.post).match(/(?:^|\/)KhamsatRequests\/(\d+)$/i);
       if (!idMatch) continue;
       const id = Number(idMatch[1]);
       if (!Number.isSafeInteger(id) || id <= 0) continue;
-      const normalizedUrl = `https://khamsat.com${url.pathname}`;
-      const anchorText = cleanTitle(htmlToText(match[3] || ""), "khamsat");
-      const slugTitle = titleFromUrl(normalizedUrl);
-      const anchorIsUseful = anchorText && !/^(?:فتح\s+(?:المشروع|الطلب)|عرض\s+(?:المشروع|الطلب)|المزيد|اقرأ المزيد|javascript is disabled|enable javascript)$/i.test(anchorText);
-      const title = anchorIsUseful ? anchorText : (slugTitle || `طلب جديد #${id}`);
-      const candidate = { id, url: normalizedUrl, title, description: "", budget: "", skills: [], extra: [], source: "khamsat-listing" };
-      const current = found.get(id);
-      // Prefer a descriptive title over a button label or numeric fallback.
-      if (!current || (candidate.title.length > current.title.length && !isGenericTitle(candidate.title, "khamsat"))) {
-        found.set(id, candidate);
-      }
-    }
 
-    // Fallback for list HTML where project URLs are present but not wrapped in a
-    // simple <a> element that matched the parser above.
-    const pathRe = /\/community\/requests\/(\d+)(?:-[^"'\s<>?#]*)?/g;
-    for (const match of html.matchAll(pathRe)) {
-      const id = Number(match[1]);
-      if (!Number.isSafeInteger(id) || id <= 0 || found.has(id)) continue;
-      const path = match[0].split(/[?#]/, 1)[0];
-      const url = new URL(path, this.base).href;
-      found.set(id, {
-        id, url,
-        title: titleFromUrl(url) || `طلب جديد #${id}`,
-        description: "", budget: "", skills: [], extra: [], source: "khamsat-listing-slug",
-      });
+      const bodyMatch = block.match(/<div\b(?=[^>]*\bclass\s*=\s*(["'])[^"']*\btgme_widget_message_text\b[^"']*\1)[^>]*>([\s\S]*?)<\/div>/i);
+      if (!bodyMatch) continue;
+      const bodyHtml = bodyMatch[2] || "";
+      const postText = cleanTelegramPostText(htmlToText(bodyHtml));
+      const lines = postText.split(/\n+/).map((line) => line.trim()).filter(Boolean);
+      if (!lines.length) continue;
+
+      // The channel's first line is the request headline (usually prefixed with 🎯).
+      const title = cleanTitle(
+        lines[0].replace(/^[\s\u200b\u200c\u200d\u200e\u200f\u202a-\u202e\u2066-\u2069\ufeff]*(?:🎯|🔔|🆕|📌|📣)\s*/u, "").trim(),
+        "khamsat"
+      ) || `طلب خمسات #${id}`;
+      const description = lines.slice(1).join("\n").trim().slice(0, 6000);
+      if (!description && lines.length < 2) continue;
+
+      // Prefer the actual Khamsat request URL if the channel post contains it;
+      // otherwise link directly to the source Telegram post so the full text stays accessible.
+      let projectUrl = "";
+      const anchorRe = /<a\b[^>]*\bhref\s*=\s*(["'])(.*?)\1[^>]*>/gi;
+      for (const anchor of block.matchAll(anchorRe)) {
+        let href = decode(anchor[2] || "");
+        try {
+          const parsedUrl = new URL(href, "https://t.me");
+          if (parsedUrl.hostname === "khamsat.com" && /^\/community\/requests\/\d+(?:-|$)/i.test(parsedUrl.pathname)) {
+            projectUrl = parsedUrl.href;
+            break;
+          }
+        } catch { /* ignore malformed links in a public post */ }
+      }
+      if (!projectUrl) projectUrl = `https://t.me/KhamsatRequests/${id}`;
+
+      const item = {
+        id,
+        url: projectUrl,
+        title,
+        description,
+        budget: extractBudget(postText),
+        skills: [],
+        extra: [],
+        source: "khamsat-telegram",
+        channelUrl: `https://t.me/KhamsatRequests/${id}`,
+      };
+      const previous = found.get(id);
+      if (!previous || item.description.length > previous.description.length) found.set(id, item);
     }
 
     const items = [...found.values()].sort((a, b) => a.id - b.id);
-    console.log(`[khamsat] listing parsed ${items.length} real request(s); newest=${items.length ? items.reduce((max, item) => Math.max(max, item.id), 0) : "none"}`);
-    if (!items.length) throw new Error("khamsat listing loaded, but no request links could be parsed");
+    console.log(`[khamsat] Telegram feed parsed ${items.length} post(s); newest=${items.length ? items[items.length - 1].id : "none"}; descriptions=${items.filter((item) => item.description.length > 0).length}`);
+    if (!items.length) throw new Error("khamsat Telegram feed loaded, but no readable request posts could be parsed");
     return items;
   },
   async detail(item) {
-    const fallback = {
-      ...item,
-      title: (item.title && !isGenericTitle(item.title, "khamsat")) ? item.title : (titleFromUrl(item.url) || `طلب جديد #${item.id}`),
-      description: item.description || "",
-      budget: item.budget || "",
-      skills: item.skills || [],
-      extra: item.extra || [],
-    };
-    try {
-      const response = await fetch(item.url, {
-        headers: { ...HEADERS, Accept: "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8", Referer: "https://khamsat.com/community/requests" },
-        redirect: "follow",
-      });
-      if (!response.ok) {
-        console.warn(`[khamsat] detail HTTP ${response.status} for #${item.id}; sending listing title and project link`);
-        return fallback;
-      }
-      const html = await response.text();
-      if (looksLikeChallenge(html, response)) {
-        console.warn(`[khamsat] detail returned JS/challenge placeholder for #${item.id}; sending listing title and project link`);
-        return fallback;
-      }
-      const parsed = parseHtmlProject("khamsat", html, item);
-      const title = isGenericTitle(parsed.title, "khamsat") ? fallback.title : parsed.title;
-      const description = parsed.description || fallback.description;
-      const result = {
-        ...fallback,
-        ...parsed,
-        title,
-        description,
-        budget: parsed.budget || fallback.budget,
-        skills: parsed.skills?.length ? parsed.skills : fallback.skills,
-        extra: parsed.extra?.length ? parsed.extra : fallback.extra,
-      };
-      console.log(`[khamsat] detail source=${description ? (parsed.debug?.descSource || "project-page") : "listing-title-fallback"}; id=${item.id}; title=${title.slice(0, 100)}; descriptionChars=${description.length}; htmlChars=${html.length}`);
-      return result;
-    } catch (error) {
-      console.warn(`[khamsat] detail fetch failed for #${item.id}: ${String(error)}; sending listing title and project link`);
-      return fallback;
-    }
+    // The post already contains the full source text; never re-fetch the blocked Khamsat page.
+    return item;
   },
 };
+
+function cleanTelegramPostText(value) {
+  return String(value || "")
+    .replace(/[\u200b\u200c\u200d\u200e\u200f\u202a-\u202e\u2066-\u2069\ufeff]/g, "")
+    .replace(/\r/g, "")
+    .replace(/[\t\u00a0 ]+\n/g, "\n")
+    .replace(/\n[\t\u00a0 ]+/g, "\n")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
+}
 
 const SITES = [
   htmlSite({
@@ -876,6 +886,7 @@ async function run(env) {
   const listResults = await Promise.allSettled(SITES.map((site) => site.list()));
   for (let i = 0; i < SITES.length; i++) {
     const site = SITES[i];
+    const stateKey = site.stateKey || site.key;
     const result = listResults[i];
     if (result.status === "rejected") {
       console.error(`[${site.key}] list failed: ${String(result.reason)}`);
@@ -884,7 +895,7 @@ async function run(env) {
 
     const items = result.value.filter((item) => Number.isSafeInteger(Number(item.id)) && Number(item.id) > 0);
     const newestId = items.length ? Math.max(...items.map((item) => Number(item.id))) : null;
-    console.log(`[${site.key}] found=${items.length}; storedLastId=${state[site.key] ?? "missing"}; newestId=${newestId ?? "none"}`);
+    console.log(`[${site.key}] found=${items.length}; sourceStateKey=${stateKey}; storedLastId=${state[stateKey] ?? "missing"}; newestId=${newestId ?? "none"}`);
     if (!items.length) {
       console.warn(`[${site.key}] no eligible projects returned; state was not changed`);
       continue;
@@ -892,16 +903,16 @@ async function run(env) {
 
     // Repair a missing state row immediately after a successful list fetch.
     // This first successful scan is a baseline: do not flood users with old projects.
-    if (state[site.key] == null) {
+    if (state[stateKey] == null) {
       await env.DB.prepare("INSERT OR IGNORE INTO state (site, last_id) VALUES (?1, ?2)")
-        .bind(site.key, newestId).run();
-      const stored = await env.DB.prepare("SELECT last_id FROM state WHERE site = ?1").bind(site.key).first();
-      state[site.key] = Number(stored?.last_id ?? newestId);
-      console.warn(`[${site.key}] initialized missing state row at last_id=${state[site.key]}; existing projects were not sent`);
+        .bind(stateKey, newestId).run();
+      const stored = await env.DB.prepare("SELECT last_id FROM state WHERE site = ?1").bind(stateKey).first();
+      state[stateKey] = Number(stored?.last_id ?? newestId);
+      console.warn(`[${site.key}] initialized missing state row (${stateKey}) at last_id=${state[stateKey]}; existing posts were not sent`);
       continue;
     }
 
-    const lastId = Number(state[site.key]);
+    const lastId = Number(state[stateKey]);
     const fresh = items
       .filter((item) => Number(item.id) > lastId)
       .sort((a, b) => Number(a.id) - Number(b.id));
@@ -911,7 +922,7 @@ async function run(env) {
     const audience = users.filter((user) => parseSites(user.sites).includes(site.key));
     if (!audience.length) {
       // Do not accumulate old jobs while nobody is subscribed to this site.
-      stateUpdates[site.key] = newestId;
+      stateUpdates[stateKey] = newestId;
       console.warn(`[${site.key}] no active subscribers selected this site; skipping ${fresh.length} new jobs and advancing to ${newestId}`);
       continue;
     }
@@ -946,13 +957,13 @@ async function run(env) {
       processed++;
       lastProcessedId = Number(item.id);
       if (recipients.length) {
-        pending.push({ key: `${site.key}:${item.id}`, text: formatMessage(site, full), chatIds: recipients });
+        pending.push({ key: `${site.key}:${site.messageKeyPrefix || ""}${item.id}`, text: formatMessage(site, full), chatIds: recipients });
         console.log(`[${site.key}] project=${item.id}; recipients=${recipients.length}; queued=true`);
       } else {
         console.log(`[${site.key}] project=${item.id}; recipients=0; skipped_by_keyword_filter=true`);
       }
     }
-    if (lastProcessedId > lastId) stateUpdates[site.key] = lastProcessedId;
+    if (lastProcessedId > lastId) stateUpdates[stateKey] = lastProcessedId;
   }
 
   const recipientCount = pending.reduce((sum, project) => sum + project.chatIds.length, 0);
@@ -1992,7 +2003,8 @@ function formatMessage(site, project) {
     if (project.description && descriptionLimit > 0) {
       lines.push("", esc(truncate(project.description, descriptionLimit)));
     }
-    lines.push("", `🔗 <a href="${esc(safeUrl(project.url))}">فتح المشروع</a>`);
+    const linkLabel = project.channelUrl && safeUrl(project.url) === safeUrl(project.channelUrl) ? "فتح منشور تيليجرام" : "فتح المشروع";
+    lines.push("", `🔗 <a href="${esc(safeUrl(project.url))}">${linkLabel}</a>`);
     return lines.join("\n");
   };
 
