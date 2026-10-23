@@ -381,6 +381,107 @@ function textBetweenLabels(text, startLabel, endLabels) {
   return cleanText(endMatch ? remainder.slice(0, endMatch.index) : remainder);
 }
 
+
+// Khamsat's detail pages may return a JavaScript-disabled placeholder to Workers.
+// Still publish the real request discovered on the listing page: preserve its ID,
+// use the actual listing anchor text when available, otherwise derive a readable
+// title from the request URL slug. A blocked detail page must never replace the
+// project title with "JavaScript is disabled" or cause the request to disappear.
+const khamsatSite = {
+  key: "khamsat",
+  name: "خمسات",
+  base: "https://khamsat.com",
+  listUrl: "https://khamsat.com/community/requests",
+  async list() {
+    const response = await fetch(this.listUrl, { headers: HEADERS, redirect: "follow" });
+    if (!response.ok) throw new Error(`khamsat list HTTP ${response.status}`);
+    const html = await response.text();
+    if (looksLikeChallenge(html)) throw new Error("khamsat listing returned a challenge page; no reliable project list available");
+
+    const found = new Map();
+    const anchorRe = /<a\b[^>]*\bhref\s*=\s*(["'])(.*?)\1[^>]*>([\s\S]*?)<\/a>/gi;
+    for (const match of html.matchAll(anchorRe)) {
+      const rawHref = decode(match[2] || "");
+      let url;
+      try { url = new URL(rawHref, this.base); } catch { continue; }
+      const idMatch = url.pathname.match(/^\/community\/requests\/(\d+)(?:-|$)/);
+      if (!idMatch) continue;
+      const id = Number(idMatch[1]);
+      if (!Number.isSafeInteger(id) || id <= 0) continue;
+      const normalizedUrl = `https://khamsat.com${url.pathname}`;
+      const anchorText = cleanTitle(htmlToText(match[3] || ""), "khamsat");
+      const slugTitle = titleFromUrl(normalizedUrl);
+      const anchorIsUseful = anchorText && !/^(?:فتح\s+(?:المشروع|الطلب)|عرض\s+(?:المشروع|الطلب)|المزيد|اقرأ المزيد|javascript is disabled|enable javascript)$/i.test(anchorText);
+      const title = anchorIsUseful ? anchorText : (slugTitle || `طلب جديد #${id}`);
+      const candidate = { id, url: normalizedUrl, title, description: "", budget: "", skills: [], extra: [], source: "khamsat-listing" };
+      const current = found.get(id);
+      // Prefer a descriptive title over a button label or numeric fallback.
+      if (!current || (candidate.title.length > current.title.length && !isGenericTitle(candidate.title, "khamsat"))) {
+        found.set(id, candidate);
+      }
+    }
+
+    // Fallback for list HTML where project URLs are present but not wrapped in a
+    // simple <a> element that matched the parser above.
+    const pathRe = /\/community\/requests\/(\d+)(?:-[^"'\s<>?#]*)?/g;
+    for (const match of html.matchAll(pathRe)) {
+      const id = Number(match[1]);
+      if (!Number.isSafeInteger(id) || id <= 0 || found.has(id)) continue;
+      const path = match[0].split(/[?#]/, 1)[0];
+      const url = new URL(path, this.base).href;
+      found.set(id, {
+        id, url,
+        title: titleFromUrl(url) || `طلب جديد #${id}`,
+        description: "", budget: "", skills: [], extra: [], source: "khamsat-listing-slug",
+      });
+    }
+
+    const items = [...found.values()].sort((a, b) => a.id - b.id);
+    console.log(`[khamsat] listing parsed ${items.length} real request(s); newest=${items.length ? items.reduce((max, item) => Math.max(max, item.id), 0) : "none"}`);
+    if (!items.length) throw new Error("khamsat listing loaded, but no request links could be parsed");
+    return items;
+  },
+  async detail(item) {
+    const fallback = {
+      ...item,
+      title: (item.title && !isGenericTitle(item.title, "khamsat")) ? item.title : (titleFromUrl(item.url) || `طلب جديد #${item.id}`),
+      description: item.description || "",
+      budget: item.budget || "",
+      skills: item.skills || [],
+      extra: item.extra || [],
+    };
+    try {
+      const response = await fetch(item.url, { headers: HEADERS, redirect: "follow" });
+      if (!response.ok) {
+        console.warn(`[khamsat] detail HTTP ${response.status} for #${item.id}; sending listing title and project link`);
+        return fallback;
+      }
+      const html = await response.text();
+      if (looksLikeChallenge(html)) {
+        console.warn(`[khamsat] detail returned JS/challenge placeholder for #${item.id}; sending listing title and project link`);
+        return fallback;
+      }
+      const parsed = parseHtmlProject("khamsat", html, item);
+      const title = isGenericTitle(parsed.title, "khamsat") ? fallback.title : parsed.title;
+      const description = isUsefulDescription(parsed.description, title) ? parsed.description : fallback.description;
+      const result = {
+        ...fallback,
+        ...parsed,
+        title,
+        description,
+        budget: parsed.budget || fallback.budget,
+        skills: parsed.skills?.length ? parsed.skills : fallback.skills,
+        extra: parsed.extra?.length ? parsed.extra : fallback.extra,
+      };
+      console.log(`[khamsat] detail source=${description ? "project-page" : "listing-title-fallback"}; id=${item.id}; title=${title.slice(0, 100)}; descriptionChars=${description.length}`);
+      return result;
+    } catch (error) {
+      console.warn(`[khamsat] detail fetch failed for #${item.id}: ${String(error)}; sending listing title and project link`);
+      return fallback;
+    }
+  },
+};
+
 const SITES = [
   htmlSite({
     key: "kafiil",
@@ -397,13 +498,8 @@ const SITES = [
     linkRe: /\/project\/(\d+)(?:-[^"'\s<>?#]*)?/g,
   }),
   nafezlyTelegram,
-  htmlSite({
-    key: "khamsat",
-    name: "خمسات",
-    base: "https://khamsat.com",
-    listUrl: "https://khamsat.com/community/requests",
-    linkRe: /\/community\/requests\/(\d+)(?:-[^"'\s<>?#]*)?/g,
-  }),
+  khamsatSite,
+
   freelancer,
 ];
 const SITE_KEYS = SITES.map((site) => site.key);
