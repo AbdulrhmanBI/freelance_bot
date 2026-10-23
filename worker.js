@@ -1251,77 +1251,112 @@ function classifyChannelProject(project) {
   const description = normalizeCategoryText(project?.description || "");
   const skills = normalizeCategoryText((project?.skills || []).join(" "));
   const all = `${title} ${description} ${skills}`.trim();
-  if (!all) return null;
+  if (!title || !all) return null;
+
   const titleHas = (phrases) => categoryHasAny(title, phrases);
-  const allHas = (phrases) => categoryHasAny(all, phrases);
   const bodyHas = (phrases) => categoryHasAny(`${description} ${skills}`.trim(), phrases);
+  const allHas = (phrases) => categoryHasAny(all, phrases);
 
-  // Hard out-of-scope guards: do not classify a project from incidental mentions
-  // such as "community management" in a game-development brief or "writing" in a
-  // legal-motion brief. The channel is for data/office/production tasks, not every
-  // project that happens to mention a supported skill.
-  const legalCore = [
+  // PRINCIPLE: classify the actual deliverable, not any incidental word in the
+  // description or the source site's often-wrong category. A title signal wins.
+  // If the title describes an unrelated specialist deliverable, secondary words
+  // such as voice acting, marketing, writing, or analytics must not pull it in.
+  const hardOutOfScopeTitle = [
+    // Legal / litigation
     "motion for extension", "motion to extend", "party deposition", "deposition deadline",
-    "rules of civil procedure", "court scheduling order", "proposed order", "litigation",
-    "legal writing", "legal research", "court filing", "court motion", "مذكرة قانونية",
-    "بحث قانوني", "صياغة قانونية", "محكمة", "إجراءات مدنية", "استئناف قضائي"
+    "rules of civil procedure", "court scheduling order", "proposed court order",
+    "legal motion", "legal writing", "legal research", "court filing", "litigation support",
+    "مذكرة قانونية", "بحث قانوني", "صياغة قانونية", "مستندات قضائية", "مرافعة قانونية",
+    // Game development
+    "roblox developer", "roblox game", "game development", "game developer", "game design",
+    "game programmer", "game programming", "game mechanics", "video game", "mobile game",
+    "unity developer", "unreal engine", "lua scripting", "تطوير العاب", "تطوير لعبة",
+    "تصميم العاب", "برمجة العاب", "لعبة روبلوكس",
+    // Animation / full video production (voice is only a subtask)
+    "animated film", "animation film", "2d animation", "3d animation", "animated movie",
+    "animation production", "cartoon animation", "character animation", "film production",
+    "short film production", "full video production", "انتاج فيلم رسوم متحركة", "فيلم انيميشن",
+    "تحريك ثنائي الابعاد", "تحريك ثلاثي الابعاد", "انتاج فيلم", "انتاج رسوم متحركة",
+    // Other unrelated specialist work
+    "website development", "web development", "web developer", "mobile app development",
+    "software development", "software engineer", "backend development", "frontend development",
+    "3d modeling", "3d modelling", "architectural design", "mechanical engineering",
+    "تطوير مواقع", "برمجة مواقع", "تطوير تطبيقات", "تطوير برمجيات", "نمذجة ثلاثية الابعاد",
   ];
-  const gameDevCore = [
-    "roblox", "roblox studio", "game development", "game developer", "game design",
-    "game mechanics", "video game", "mobile game development", "unity game", "unreal engine",
-    "lua scripting", "gameplay systems", "تطوير العاب", "تطوير لعبة", "تصميم العاب",
-    "برمجة العاب", "لعبة روبلوكس"
-  ];
-  if (titleHas(legalCore) || titleHas(gameDevCore)) return null;
-  // If the title is clearly in a specialist domain, incidental mentions of office,
-  // marketing, analytics or writing in the body should not pull it into this channel.
-  if (allHas(gameDevCore) && (allHas(["lua", "scripting", "inventory system", "vehicle simulator", "game testing", "3d modelling", "3d modeling"]))) return null;
+  if (titleHas(hardOutOfScopeTitle)) return null;
 
-  const strongTitle = titleHas(DATA_ANALYSIS_STRONG);
-  const strongBody = bodyHas(DATA_ANALYSIS_STRONG);
+  // Very strong data/BI intent. Generic tools (Python, SQL, Excel) do not qualify
+  // unless the title or the brief actually asks for analysis/reporting/BI output.
+  const strongAnalysisTitle = titleHas(DATA_ANALYSIS_STRONG);
+  const explicitAnalysisDeliverable = bodyHas([
+    "perform data analysis", "analyze the data", "analyse the data", "analyze sales data",
+    "analyse sales data", "build a dashboard", "create a dashboard", "develop a dashboard",
+    "create kpi report", "build kpi dashboard", "data visualization", "data visualisation",
+    "business intelligence report", "clean and analyze data", "clean and analyse data",
+    "تحليل البيانات", "تحليل بيانات", "تحليل المبيعات", "تحليل مالي", "تحليل احصائي",
+    "انشاء داشبورد", "تصميم داشبورد", "بناء لوحة معلومات", "لوحة مؤشرات الاداء",
+    "استخراج مؤشرات الاداء", "تنظيف وتحليل البيانات", "تصور البيانات"
+  ]);
   const analysisContext = allHas(ANALYSIS_CONTEXT);
-  const broadTool = allHas(BROAD_DATA_TOOLS);
-  const reportSignal = allHas(REPORT_SIGNALS);
-  // Keep explicit BI/analysis terms first. Python, SQL and Excel alone are not enough.
-  if (strongTitle || strongBody || (analysisContext && broadTool) || (reportSignal && analysisContext)) {
-    const reason = strongTitle ? "strong-analysis-signal-in-title"
-      : strongBody ? "strong-analysis-signal-in-description-or-skills"
-      : analysisContext && broadTool ? "broad-data-tool-with-analysis-context"
-      : "report-or-dashboard-with-analysis-context";
-    return { key:"data_analysis", label:CHANNEL_CATEGORY_LABELS.data_analysis, reason, group:"data_analysis" };
-  }
-  // Prioritize product listing so projects that also mention Excel/data entry keep their specific ecommerce label.
-  const ecommerceCategory = GENERAL_CATEGORIES.find((category) => category.key === "ecommerce_listing");
-  if (ecommerceCategory && allHas(ecommerceCategory.phrases)) return {
-    key:ecommerceCategory.key, label:CHANNEL_CATEGORY_LABELS[ecommerceCategory.key],
-    reason:`general-category:${ecommerceCategory.key}`, group:"general_tasks"
-  };
-  for (const category of GENERAL_CATEGORIES) {
-    if (category.key === "ecommerce_listing") continue;
-    if (!allHas(category.phrases)) continue;
-    // Social media is a category only when the job is actually asking for this
-    // service, not when the client merely mentions their own marketing/community.
-    if (category.key === "social_media") {
-      const explicitSocialTitle = titleHas([
-        "social media", "social media manager", "social media management", "social media marketing",
-        "instagram management", "facebook page management", "increase followers", "increase engagement",
-        "سوشيال ميديا", "ادارة حسابات", "ادارة صفحات", "زيادة التفاعل", "زيادة المتابعين",
-        "تفاعل على فيسبوك", "تفاعل على انستجرام", "ادارة صفحة فيسبوك"
-      ]);
-      const explicitSocialBrief = bodyHas([
-        "manage social media", "manage our social media", "manage instagram", "manage facebook page",
-        "social media posts", "social media campaign", "increase followers", "increase engagement",
-        "سوشيال ميديا", "ادارة حسابات التواصل", "ادارة صفحات", "زيادة التفاعل", "زيادة المتابعين",
-        "نشر بوستات", "تفاعل على السوشيال ميديا"
-      ]);
-      if (!explicitSocialTitle && !explicitSocialBrief) continue;
-    }
+  const broadDataTool = allHas(BROAD_DATA_TOOLS);
+  if (strongAnalysisTitle || (explicitAnalysisDeliverable && (analysisContext || broadDataTool))) {
     return {
-      key:category.key, label:CHANNEL_CATEGORY_LABELS[category.key],
-      reason:`general-category:${category.key}`, group:"general_tasks"
+      key:"data_analysis", label:CHANNEL_CATEGORY_LABELS.data_analysis,
+      reason:strongAnalysisTitle ? "explicit-data-analysis-title" : "explicit-analysis-deliverable-with-context",
+      group:"data_analysis"
     };
   }
-  // Generic Python/SQL/JS, unrelated development and unrelated design stay out.
+
+  // Map title phrases to categories first. This prevents a secondary mention in
+  // the description (e.g. voice acting inside an animation job) from winning.
+  const titlePriority = [
+    "ecommerce_listing", "pdf_documents", "presentations", "cv_resume", "data_entry",
+    "excel_office", "transcription_subtitles", "translation", "proofreading",
+    "arabic_content", "social_media", "research_assistant", "customer_support",
+    "forms_surveys", "basic_design", "video_audio", "voiceover_audio"
+  ];
+  for (const key of titlePriority) {
+    const category = GENERAL_CATEGORIES.find((item) => item.key === key);
+    if (category && titleHas(category.phrases)) {
+      return {
+        key:category.key, label:CHANNEL_CATEGORY_LABELS[category.key],
+        reason:`explicit-title:${category.key}`, group:"general_tasks"
+      };
+    }
+  }
+
+  // Description fallback is intentionally stricter: require wording that clearly
+  // asks for the service, not just a related skill/word. Skills alone never qualify.
+  const directIntent = [
+    {key:"ecommerce_listing", phrases:["upload products to", "add products to", "create product listings", "enter product listings", "رفع منتجات للمتجر", "ادخال منتجات المتجر"]},
+    {key:"pdf_documents", phrases:["edit this pdf", "edit pdf files", "convert pdf to", "convert files to pdf", "merge pdf files", "split pdf", "compress pdf", "تحويل pdf", "تعديل ملف pdf", "دمج ملفات pdf", "ضغط ملف pdf"]},
+    {key:"presentations", phrases:["create a powerpoint", "make a powerpoint", "prepare a presentation", "design a presentation", "create a slide deck", "prepare slides", "اعداد عرض تقديمي", "تصميم عرض تقديمي", "عمل عرض بوربوينت"]},
+    {key:"cv_resume", phrases:["write my cv", "create a cv", "write a resume", "design my resume", "prepare a cover letter", "كتابة سيرة ذاتية", "تصميم cv", "اعداد سيرة ذاتية"]},
+    {key:"data_entry", phrases:["data entry task", "enter data into", "copy data into", "transfer data from", "manual data entry", "ادخال بيانات", "نقل بيانات الى", "نسخ البيانات الى"]},
+    {key:"excel_office", phrases:["format an excel spreadsheet", "format excel file", "organize excel data", "create excel formulas", "clean up this spreadsheet", "تنسيق ملف اكسل", "تعديل ملف اكسل", "عمل معادلات اكسل"]},
+    {key:"transcription_subtitles", phrases:["transcribe this audio", "transcribe audio files", "transcribe a video", "create subtitles", "add subtitles to", "convert audio to text", "تفريغ صوتي", "تفريغ تسجيل", "اضافة ترجمة للفيديو"]},
+    {key:"translation", phrases:["translate this document", "translate documents", "translate from english into", "translate from arabic into", "translate the following text", "ترجمة مستندات", "ترجمة ملف", "ترجمة من الانجليزية الى", "ترجمة من العربية الى"]},
+    {key:"proofreading", phrases:["proofread this text", "proofread a document", "check grammar and spelling", "edit and proofread", "تدقيق لغوي", "مراجعة لغوية", "تصحيح املائي"]},
+    {key:"arabic_content", phrases:["write arabic content", "write articles in arabic", "write an arabic article", "arabic blog writing", "كتابة محتوى عربي", "كتابة مقال عربي", "كتابة مقالات باللغة العربية"]},
+    {key:"social_media", phrases:["manage our social media", "manage instagram and facebook", "manage social media accounts", "create a social media calendar", "schedule social media posts", "increase social media engagement", "ادارة حسابات التواصل", "ادارة صفحات السوشيال ميديا", "جدولة منشورات", "زيادة التفاعل على السوشيال ميديا"]},
+    {key:"research_assistant", phrases:["web research task", "research information online", "collect information from websites", "virtual assistant needed", "بحث على الانترنت", "جمع معلومات من المواقع", "مساعد افتراضي"]},
+    {key:"customer_support", phrases:["respond to customer messages", "provide customer support", "answer customer inquiries", "customer service agent needed", "الرد على رسائل العملاء", "خدمة عملاء", "الرد على استفسارات العملاء"]},
+    {key:"forms_surveys", phrases:["create a google form", "create an online survey", "build a questionnaire", "collect survey responses", "انشاء استبيان", "تصميم نموذج جوجل", "جمع نتائج الاستبيان"]},
+    {key:"basic_design", phrases:["remove image background", "edit images for", "resize a batch of images", "edit a canva template", "ازالة خلفية الصور", "تعديل صور", "تعديل قالب كانفا"]},
+    {key:"video_audio", phrases:["edit this video", "edit video clips", "edit a podcast", "clean up audio recording", "مونتاج فيديو", "تعديل مقاطع فيديو", "تنقية الصوت"]},
+    {key:"voiceover_audio", phrases:["record a voiceover", "need a voiceover artist", "record voice narration", "provide voice acting only", "dub this video", "تعليق صوتي فقط", "تسجيل فويس اوفر", "مطلوب معلق صوتي", "دوبلاج فقط"]},
+  ];
+  for (const intent of directIntent) {
+    if (!bodyHas(intent.phrases)) continue;
+    const category = GENERAL_CATEGORIES.find((item) => item.key === intent.key);
+    if (category) return {
+      key:category.key, label:CHANNEL_CATEGORY_LABELS[category.key],
+      reason:`explicit-body-intent:${category.key}`, group:"general_tasks"
+    };
+  }
+
+  // No reliable primary service detected -> do not publish. This conservative
+  // default is deliberate: a smaller, relevant channel is better than noise.
   return null;
 }
 function formatChannelMessage(site, project, category) {
