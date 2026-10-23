@@ -4,6 +4,7 @@
 // Required bindings/secrets:
 //   DB (D1), BOT_TOKEN, WEBHOOK_SECRET, ADMIN_KEY; ADMIN_ID optional
 // Cron: * * * * *
+// Freelancer source: supported time_updated sort, newest-first, original submission age <= 15 minutes.
 // =====================================================================
 
 const MAX_NEW_PER_RUN = 10;
@@ -11,9 +12,10 @@ const SEND_BATCH = 30;
 const MAX_KEYWORDS = 20;
 const DEFAULT_SITES = "kafiil,mostaql,nafezly,khamsat,freelancer";
 const MAX_DESCRIPTION = 1800;
-// Freelancer alerts are limited to projects originally submitted in the last 24 hours.
-// Do not use time_updated: an old project can be updated while still being years old.
-const FREELANCER_MAX_AGE_SECONDS = 24 * 60 * 60;
+// Freelancer: only deliver projects whose original submission timestamp is within 15 minutes.
+// The API query sorts by a supported field (time_updated); we still validate the original
+// submission time locally so an old project that was merely updated is never announced.
+const FREELANCER_MAX_AGE_SECONDS = 15 * 60;
 const FREELANCER_FUTURE_CLOCK_SKEW_SECONDS = 5 * 60;
 
 const HEADERS = {
@@ -78,17 +80,17 @@ const freelancer = {
     const nowAtStart = Math.floor(Date.now() / 1000);
     const cutoffAtStart = nowAtStart - FREELANCER_MAX_AGE_SECONDS;
 
-    // Freelancer supports from_time as a Unix timestamp (seconds). We also
-    // enforce the same cutoff locally; that guard is what prevents an old,
-    // still-open project from ever being sent if the API ignores the filter.
+    // Freelancer's supported sort field here is time_updated (not submitdate).
+    // reverse_sort=false returns newest first in the SDK examples. Filter the API
+    // server-side to a 15-minute window, and enforce original submission time locally.
+    // to_time bounds the window so future projects are not inadvertently included.
     const filteredUrls = [
-      `${base}?limit=50&full_description=true&job_details=true&from_time=${cutoffAtStart}&sort_field=submitdate&reverse_sort=false`,
-      `${base}?limit=50&full_description=true&job_details=true&from_time=${cutoffAtStart}`,
+      `${base}?limit=50&full_description=true&job_details=true&from_time=${cutoffAtStart}&to_time=${nowAtStart}&sort_field=time_updated&reverse_sort=false`,
+      `${base}?limit=50&full_description=true&job_details=true&from_time=${cutoffAtStart}&sort_field=time_updated&reverse_sort=false`,
     ];
 
     let lastError = "no successful response";
     let sawValidProjectArray = false;
-    let lastValidProjects = null;
 
     const convertAndFilter = (projects, attemptLabel) => {
       const checkedAt = Math.floor(Date.now() / 1000);
@@ -145,13 +147,23 @@ const freelancer = {
         });
       }
 
+      const topBySubmission = projects
+        .map((project) => ({
+          id: Number(project.id),
+          submittedAt: normalizeUnixSeconds(project.time_submitted) ?? normalizeUnixSeconds(project.submitdate),
+        }))
+        .filter((project) => Number.isSafeInteger(project.id) && project.id > 0 && project.submittedAt)
+        .sort((a, b) => b.submittedAt - a.submittedAt || b.id - a.id)
+        .slice(0, 5)
+        .map((project) => `${project.id}:${Math.max(0, Math.floor((checkedAt - project.submittedAt) / 60))}m`);
+
       console.log(
-        `[freelancer] ${attemptLabel}: raw=${projects.length}; recent24h=${recent.length}; ` +
+        `[freelancer] ${attemptLabel}: raw=${projects.length}; recent15m=${recent.length}; ` +
         `rejectedOld=${rejectedOld}; missingTimestamp=${rejectedMissingDate}; ` +
-        `futureTimestamp=${rejectedFutureDate}; cutoff=${cutoff}; ` +
-        `sampleDates=${projects.slice(0, 5).map((project) => `${project.id}:${normalizeUnixSeconds(project.time_submitted) ?? normalizeUnixSeconds(project.submitdate) ?? "missing"}`).join(",") || "none"}`
+        `futureTimestamp=${rejectedFutureDate}; maxAgeSeconds=${FREELANCER_MAX_AGE_SECONDS}; ` +
+        `newestBySubmission(id:age)=${topBySubmission.join(",") || "none"}`
       );
-      return recent.sort((a, b) => (a.submittedAt - b.submittedAt) || (a.id - b.id));
+      return recent.sort((a, b) => (b.submittedAt - a.submittedAt) || (b.id - a.id));
     };
 
     // Try server-side filtering using two supported query variants. If the API
@@ -178,15 +190,13 @@ const freelancer = {
         }
 
         sawValidProjectArray = true;
-        lastValidProjects = projects;
         const recent = convertAndFilter(projects, `filtered API attempt ${attempt + 1}`);
         if (recent.length > 0) {
-          console.log(`[freelancer] accepted ${recent.length} project(s) published within the last 24 hours`);
+          console.log(`[freelancer] accepted ${recent.length} project(s) submitted within the last 15 minutes`);
           return recent;
         }
         if (projects.length === 0) {
-          console.log("[freelancer] API returned no projects for the recent-time window");
-          return [];
+          console.log(`[freelancer] attempt ${attempt + 1} returned an empty list; trying the next supported query variant`);
         }
       } catch (error) {
         lastError = String(error);
@@ -194,18 +204,18 @@ const freelancer = {
       }
     }
 
-    // If a valid API response was received but it contained only old projects
-    // or records without timestamps, return none; never fall back to announcing
-    // stale jobs. A plain query is used only when the filtered API requests fail.
+    // If valid API responses only contain old projects or records without timestamps,
+    // return none; never fall back to announcing stale jobs. The plain query is used
+    // only when the filtered API requests fail at HTTP/JSON level.
     if (sawValidProjectArray) {
       console.warn(`[freelancer] no verifiably recent projects; old/undated projects will not be sent`);
       return [];
     }
 
-    // Compatibility fallback when from_time requests failed entirely. The local
-    // age check is still applied, so this cannot allow old projects through.
+    // Compatibility fallback only when both filtered query variants failed at HTTP/JSON level.
+    // The local 15-minute submission-time check is still mandatory.
     try {
-      const fallbackUrl = `${base}?limit=50&full_description=true&job_details=true&sort_field=submitdate&reverse_sort=false`;
+      const fallbackUrl = `${base}?limit=50&full_description=true&job_details=true&sort_field=time_updated&reverse_sort=false`;
       const response = await fetch(fallbackUrl, {
         headers: { ...HEADERS, Accept: "application/json" },
         redirect: "follow",
@@ -215,7 +225,7 @@ const freelancer = {
       const projects = data?.result?.projects;
       if (!Array.isArray(projects)) throw new Error("API response did not contain result.projects");
       const recent = convertAndFilter(projects, "unfiltered fallback");
-      console.log(`[freelancer] unfiltered fallback yielded ${recent.length} project(s) within the last 24 hours`);
+      console.log(`[freelancer] unfiltered fallback yielded ${recent.length} project(s) submitted within the last 15 minutes`);
       return recent;
     } catch (error) {
       lastError = String(error);
@@ -874,13 +884,26 @@ async function dryRun() {
   await Promise.all(SITES.map(async (site) => {
     try {
       const items = await site.list();
-      const sorted = items.slice().sort((a, b) => Number(b.id) - Number(a.id));
+      const sorted = items.slice().sort((a, b) => {
+        if (site.key === "freelancer") {
+          const aTime = normalizeUnixSeconds(a.submittedAt) ?? 0;
+          const bTime = normalizeUnixSeconds(b.submittedAt) ?? 0;
+          return bTime - aTime || Number(b.id) - Number(a.id);
+        }
+        return Number(b.id) - Number(a.id);
+      });
       let sample = null;
       if (sorted[0]) {
         sample = site.detail ? await site.detail(sorted[0]) : sorted[0];
         sample = { ...sample, description: truncate(sample.description || "", 500) };
       }
-      output[site.key] = { found: items.length, newestIds: sorted.slice(0, 5).map((item) => item.id), sample };
+      const result = { found: items.length, newestIds: sorted.slice(0, 5).map((item) => item.id), sample };
+      if (site.key === "freelancer" && sorted[0]?.submittedAt) {
+        const newestTimestamp = normalizeUnixSeconds(sorted[0].submittedAt);
+        result.newestSubmittedAt = new Date(newestTimestamp * 1000).toISOString();
+        result.newestAgeMinutes = Math.max(0, Math.floor((Date.now() / 1000 - newestTimestamp) / 60));
+      }
+      output[site.key] = result;
     } catch (error) {
       output[site.key] = { error: String(error) };
     }
