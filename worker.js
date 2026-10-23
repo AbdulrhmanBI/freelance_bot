@@ -489,28 +489,24 @@ const khamsatSite = {
         headers: { ...HEADERS, Accept: "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8", Referer: "https://khamsat.com/community/requests" },
         redirect: "follow",
       });
-      if (!response.ok) {
-        console.warn(`[khamsat] detail HTTP ${response.status} for #${item.id}; sending listing title and project link`);
-        return fallback;
-      }
+      // Some responses that are not HTTP 200 still include Open Graph/JSON-LD
+      // metadata. Parse first, then decide whether the response has useful fields.
       const html = await response.text();
-      if (looksLikeChallenge(html, response)) {
-        console.warn(`[khamsat] detail returned JS/challenge placeholder for #${item.id}; sending listing title and project link`);
-        return fallback;
-      }
       const parsed = parseHtmlProject("khamsat", html, item);
       const title = isGenericTitle(parsed.title, "khamsat") ? fallback.title : parsed.title;
-      const description = parsed.description || fallback.description;
-      const result = {
-        ...fallback,
-        ...parsed,
-        title,
-        description,
-        budget: parsed.budget || fallback.budget,
-        skills: parsed.skills?.length ? parsed.skills : fallback.skills,
-        extra: parsed.extra?.length ? parsed.extra : fallback.extra,
-      };
-      console.log(`[khamsat] detail source=${description ? (parsed.debug?.descSource || "project-page") : "listing-title-fallback"}; id=${item.id}; title=${title.slice(0, 100)}; descriptionChars=${description.length}; htmlChars=${html.length}`);
+      const description = isUsefulDescription(parsed.description, title) ? parsed.description : fallback.description;
+      const budget = parsed.budget || fallback.budget;
+      const skills = parsed.skills?.length ? parsed.skills : fallback.skills;
+      const extra = parsed.extra?.length ? parsed.extra : fallback.extra;
+      const challenge = looksLikeChallenge(html, response);
+      const hasUsefulDetails = Boolean(description || budget || skills.length || extra.length);
+
+      if ((!response.ok || challenge) && !hasUsefulDetails) {
+        console.warn(`[khamsat] detail unavailable for #${item.id}; status=${response.status}; challenge=${challenge}; no useful metadata in response`);
+        return fallback;
+      }
+      const result = { ...fallback, ...parsed, title, description, budget, skills, extra };
+      console.log(`[khamsat] detail source=${description ? (parsed.debug?.descSource || "project-page") : hasUsefulDetails ? "project-page-metadata-only" : "listing-title-fallback"}; id=${item.id}; status=${response.status}; challenge=${challenge}; budget=${Boolean(budget)}; descriptionChars=${description.length}; htmlChars=${html.length}`);
       return result;
     } catch (error) {
       console.warn(`[khamsat] detail fetch failed for #${item.id}: ${String(error)}; sending listing title and project link`);
@@ -549,9 +545,11 @@ function extractTelegramPosts(html) {
 const REQUEST_LABELS = {
   title: ["عنوان الطلب", "عنوان المشروع", "العنوان", "عنوان"],
   description: ["تفاصيل الطلب", "تفاصيل المشروع", "وصف الطلب", "الوصف", "التفاصيل", "تفاصيل"],
-  budget: ["الميزانية المتوقعة", "ميزانية الطلب", "الميزانية", "الميزانيه", "السعر"],
+  budget: ["الميزانية المتوقعة", "ميزانية الطلب", "ميزانية المشروع", "الميزانية", "الميزانيه", "السعر", "budget", "estimated budget", "price range"],
+  owner: ["صاحب الطلب", "اسم صاحب الطلب", "المشتري"],
+  requestType: ["نوع الطلب", "التصنيف", "القسم"],
   duration: ["مدة التنفيذ", "المدة", "مدة"],
-  skip: ["رابط الطلب", "رابط المشروع", "الرابط", "صاحب الطلب", "المشتري", "التصنيف", "القسم", "الحالة", "عدد العروض", "تاريخ النشر", "الوقت", "منذ"],
+  skip: ["رابط الطلب", "رابط المشروع", "الرابط", "الحالة", "عدد العروض", "تاريخ النشر", "الوقت", "منذ"],
 };
 
 // Removes emoji / bullets / markdown marks in front of a line and around a label.
@@ -567,22 +565,41 @@ function matchRequestLabel(line) {
   const clean = stripPostDecoration(line);
   for (const [field, labels] of Object.entries(REQUEST_LABELS)) {
     for (const label of labels) {
-      // A label is "label:" (value may follow) or a line that is exactly the label.
-      const match = clean.match(new RegExp(`^${label}\\s*(?:[:：]\\s*(.*)|)$`));
-      if (match) return { field, rest: (match[1] || "").trim() };
+      // Metadata fields may be written as "label: value" or "label value".
+      // The value-after-space variant is enabled only for budget/owner/type so
+      // ordinary prose is not accidentally consumed as a labelled field.
+      const escaped = label.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+      const separator = field === "budget" || field === "owner" || field === "requestType"
+        ? "\\s*(?:[:：]\\s*(.*)|\\s+(.+)|)"
+        : "\\s*(?:[:：]\\s*(.*)|)";
+      const match = clean.match(new RegExp(`^${escaped}${separator}$`, "i"));
+      if (match) return { field, rest: (match[1] || match[2] || "").trim() };
     }
   }
   return null;
 }
 
 // Parses one channel post into title / description / budget, with or without labels.
+function extractStandaloneBudgetLine(rawLine) {
+  let source = normalizeDigits(stripPostDecoration(rawLine));
+  if (!source) return "";
+  source = source.replace(/^(?:الميزانية(?:\s+المتوقعة)?|ميزانية(?:\s+(?:الطلب|المشروع))?|الميزانيه|السعر|budget|estimated budget|price range)\s*[:：-]?\s*/i, "").trim();
+  const hasCurrency = /[$€£]|\b(?:USD|US\$|EUR|GBP|SAR|EGP|AED|دولار(?:اً)?|ريال(?:اً)?|جنيه(?:اً)?|ج\.?م\.?)\b/i.test(source)
+    || /(?:دولار|ريال|جنيه)/i.test(source);
+  if (!hasCurrency || !/^\s*(?:(?:من|from)\s*)?(?:[$€£]\s*)?\d/.test(source)) return "";
+  const amount = /(?:[$€£]\s*)?\d[\d,٫.]*(?:\s*(?:-|–|—|إلى|الى|to)\s*(?:[$€£]\s*)?\d[\d,٫.]*)?\s*(?:[$€£]|US\$|USD|EUR|GBP|SAR|EGP|AED|دولار(?:اً)?|ريال(?:اً)?|جنيه(?:اً)?|ج\.?م\.?)?/i.exec(source);
+  if (!amount || !/\d/.test(amount[0]) || !/[$€£]|US\$|USD|EUR|GBP|SAR|EGP|AED|دولار|ريال|جنيه|ج\.?م\.?/i.test(amount[0])) return "";
+  const value = cleanText(amount[0]);
+  return value.length <= 65 ? value : "";
+}
+
 function parseRequestPost(text) {
   const lines = String(text || "").split("\n").map((line) => line.trim()).filter(Boolean);
-  const buckets = { title: [], description: [], budget: [], duration: [], skip: [], preamble: [] };
+  const buckets = { title: [], description: [], budget: [], duration: [], owner: [], requestType: [], skip: [], preamble: [] };
   const ownerBits = [];
   let current = "preamble";
   for (const line of lines) {
-    // "👤 name" / "🎖 level N" lines describe the buyer; keep them out of the description.
+    // "👤 name" / badge lines describe the buyer; keep them separate from body text.
     if (current === "preamble" && buckets.preamble.length >= 1 && /^\s*(?:\u{1F464}|\u{1F396}|\u{1F3C5}|\u{1F947}|\u{1F948}|\u{1F949})/u.test(line)) {
       ownerBits.push(stripPostDecoration(line));
       continue;
@@ -592,6 +609,15 @@ function parseRequestPost(text) {
       current = label.field;
       if (label.rest) buckets[current].push(label.rest);
       continue;
+    }
+    // Some channel posts publish the amount as a standalone line (for example
+    // "💰 $100 - $250"), without an explicit "الميزانية:" label.
+    if (current !== "budget") {
+      const inferredBudget = extractStandaloneBudgetLine(line);
+      if (inferredBudget) {
+        buckets.budget.push(inferredBudget);
+        continue;
+      }
     }
     buckets[current].push(line);
   }
@@ -615,31 +641,27 @@ function parseRequestPost(text) {
 
   const budget = cleanText(clean(buckets.budget)).replace(/^[:：-]\s*/, "");
   const duration = cleanText(clean(buckets.duration));
-
-  // Khamsat channel posts sometimes put the request category beside the buyer name,
-  // or put it on a separate emoji-decorated line. Keep those fields separate so the
-  // notification matches the metadata layout used by the other job sites.
-  const ownerLines = ownerBits.map((value) => String(value || "").trim()).filter(Boolean);
   const isRequestType = (value) => /^(?:سيرة ذاتية|كتابة(?:\s+وترجمة)?|ترجمة|تصميم(?:\s+جرافيك)?|برمجة(?:\s+وتطوير)?|تسويق(?:\s+إلكتروني)?|فيديو(?:\s+وأنيميشن)?|صوتيات|هندسة(?:\s+وعمارة)?|أعمال(?:\s+وخدمات\s+استشارية)?|خدمات\s+استشارية|تدريب\s+وتعليم|تعليم|كتابة\s+محتوى|مواقع\s+إلكترونية|تطبيقات|عروض\s+تقديمية|إدخال\s+بيانات|دعم\s+فني|أخرى)$/i.test(stripPostDecoration(value));
-  let requestType = "";
-  for (let i = 0; i < ownerLines.length; i++) {
-    const segments = ownerLines[i].split(/\s+[•·|]\s+/).map((part) => part.trim()).filter(Boolean);
-    if (segments.length > 1 && isRequestType(segments[segments.length - 1])) {
-      requestType = segments.pop();
-      ownerLines[i] = segments.join(" • ");
-      break;
-    }
-    if (i > 0 && isRequestType(ownerLines[i])) {
-      requestType = ownerLines[i];
-      ownerLines.splice(i, 1);
-      break;
-    }
+
+  // Prefer explicitly labelled owner/type fields. If the feed appends a profile
+  // headline after the owner's name, never merge that headline into the name.
+  const rawOwnerValues = [...ownerBits, ...buckets.owner.map((value) => stripPostDecoration(value)).filter(Boolean)];
+  let owner = "";
+  let requestType = cleanText(clean(buckets.requestType));
+  for (const rawValue of rawOwnerValues) {
+    const segments = String(rawValue || "").split(/\s+[•·|]\s+/).map((part) => part.trim()).filter(Boolean);
+    if (!segments.length) continue;
+    if (!owner) owner = segments[0];
+    const tailType = segments.slice(1).find(isRequestType);
+    if (!requestType && tailType) requestType = tailType;
+    // Non-category text after the first segment is usually a buyer profile tagline,
+    // not the project type; intentionally do not display it as part of the name.
   }
 
   return {
     title: title.replace(/^[:：-]\s*/, ""),
-    owner: ownerLines.filter(Boolean).join(" • "),
-    requestType,
+    owner: owner.slice(0, 100),
+    requestType: requestType.slice(0, 80),
     description: cleanText(description).slice(0, 6000),
     budget: /\d/.test(budget) ? budget.slice(0, 65) : "",
     duration: duration && duration.length <= 40 ? duration : "",
@@ -732,19 +754,27 @@ const khamsatTelegram = {
     return items;
   },
   async detail(item) {
-    // The channel post normally carries the whole request. Only when it has no text at all,
-    // try the khamsat.com page (it may work for some requests).
-    if (item.description && item.description.length >= 15) return item;
+    // Use the Telegram post for its full body. If it did not include a budget,
+    // still inspect the original Khamsat page for budget metadata (when available).
+    if (item.description && item.description.length >= 15 && item.budget) return item;
     if (!/^https?:\/\/(?:www\.)?khamsat\.com\//i.test(item.url || "")) return item;
     try {
       const page = await khamsatSite.detail(item);
-      return {
+      const enriched = {
         ...item,
         ...page,
         title: item.title && !isGenericTitle(item.title, "khamsat") ? item.title : page.title,
-        description: page.description || item.description,
+        description: item.description || page.description,
         budget: page.budget || item.budget,
+        skills: page.skills?.length ? page.skills : (item.skills || []),
+        extra: [...(item.extra || [])],
       };
+      // Add only relevant page metadata not already present in the channel post.
+      for (const value of page.extra || []) {
+        if (value && !enriched.extra.includes(value)) enriched.extra.push(value);
+      }
+      console.log(`[khamsat] page enrichment: id=${item.id}; descriptionFromFeed=${Boolean(item.description)}; budgetFromFeed=${Boolean(item.budget)}; budgetAfterPage=${Boolean(enriched.budget)}`);
+      return enriched;
     } catch (error) {
       console.warn(`[khamsat] page enrichment failed for #${item.id}: ${String(error)}`);
       return item;
@@ -2243,7 +2273,13 @@ function formatMessage(site, project) {
   const build = (descriptionLimit) => {
     const title = truncate(project.title || `مشروع جديد #${project.id}`, 300);
     const lines = [`🆕 <b>${esc(title)}</b>`, `🌐 ${esc(site.name)}`];
-    if (project.budget) lines.push(`💰 ${esc(project.budget)}`);
+    // Khamsat: show a budget only when the source actually provides a numeric amount.
+    // If the budget is missing, blocked, or only says "unknown / negotiable", omit the line entirely.
+    const budgetText = String(project.budget ?? "").trim();
+    const hasKhamsatBudget = /[0-9٠-٩۰-۹]/u.test(budgetText);
+    if (site.key === "khamsat" ? hasKhamsatBudget : Boolean(budgetText)) {
+      lines.push(`💰 ${esc(budgetText)}`);
+    }
     for (const item of project.extra || []) lines.push(`📌 ${esc(item)}`);
     if (project.skills?.length) lines.push(`🏷 ${esc(project.skills.join("، "))}`);
     if (project.description && descriptionLimit > 0) {
