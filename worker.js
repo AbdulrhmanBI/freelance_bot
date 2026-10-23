@@ -71,9 +71,14 @@ const freelancer = {
   name: "Freelancer",
   async list() {
     const base = "https://www.freelancer.com/api/projects/0.1/projects/active/";
+    // IMPORTANT: Do not use reverse_sort=true here. It can reverse the date order
+    // and return older active projects first, causing newly posted projects to be
+    // missing from this small result window. Prefer newest-first and request a
+    // larger first page; fall back to the API default ordering if needed.
     const urls = [
-      `${base}?limit=30&full_description=true&job_details=true&sort_field=submitdate&reverse_sort=true`,
-      `${base}?limit=30&full_description=true&job_details=true`,
+      `${base}?limit=50&full_description=true&job_details=true&sort_field=submitdate&reverse_sort=false`,
+      `${base}?limit=50&full_description=true&job_details=true`,
+      `${base}?limit=30&full_description=true&job_details=true&sort_field=submitdate`,
     ];
     let lastError = "no successful response";
     for (const url of urls) {
@@ -89,6 +94,10 @@ const freelancer = {
           lastError = "API response did not contain result.projects";
           continue;
         }
+        console.log(
+          `[freelancer] API response: count=${projects.length}; ` +
+          `ids=${projects.slice(0, 12).map((p) => p.id).join(",") || "none"}`
+        );
         return projects.map((p) => {
           const currency = p.currency || {};
           const budgetObj = p.budget || {};
