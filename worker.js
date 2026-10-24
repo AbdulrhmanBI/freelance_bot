@@ -6,6 +6,7 @@
 //   DB (D1), BOT_TOKEN, WEBHOOK_SECRET, ADMIN_KEY; ADMIN_ID optional
 // Cron: * * * * *
 // Telegram UI: clickable profile greeting only on /start; all inline buttons are English.
+// v5: classify legitimate single LinkedIn profile/account setup as CV services; reject bulk account creation.
 // v3: Khamsat requests are read from the public Telegram channel @KhamsatRequests.
 // v2: precise anti-bot detection (normal pages are no longer discarded), line-based extraction of
 //     Mostaql/Kafiil/Khamsat project details, Telegram 4096-char safety, /?probe=<url> diagnostics.
@@ -1237,7 +1238,7 @@ const GENERAL_CATEGORIES = [
  { key:"arabic_content", phrases:["arabic writing","write arabic articles","arabic articles","write articles in arabic","arabic content","arabic copywriting","content writing","copywriting","article writing","blog writing","blog post","product description writing","product descriptions","script writing","social media captions","ad copy","writing in arabic","arabic writer","seo content writing","website content","creative writing","content creation","كتابة باللغة العربية","الكتابة باللغة العربية","كتابة محتوى","محتوى عربي","كتابة محتوى عربي","كاتب محتوى","كتابة مقالات","كتابة مقال","كتابة تدوينات","كتابة بوستات","كتابة منشورات","كتابة اعلانات","صياغة اعلانية","كتابة وصف منتجات","وصف المنتجات","كتابة محتوى تسويقي","كتابة سكريبت","كتابة نصوص اعلانية","صياغة المحتوى","كتابة محتوى لموقع","كتابة محتوى للسوشيال ميديا","كتابة محتوى متوافق مع السيو"]},
  { key:"proofreading", phrases:["proofreading","proofreader","proofread","copy editing","copy edit","grammar check","spell check","spelling correction","text editing","editing arabic text","arabic proofreading","language review","formatting text","diacritics","arabic diacritics","تدقيق لغوي","تدقيق املائي","مراجعة لغوية","مراجعة النصوص","مراجعة نص","تصحيح لغوي","تصحيح املائي","تصحيح الاخطاء","ضبط التشكيل","تشكيل النص","تشكيل الكلمات","اضافة التشكيل","تنسيق النصوص","تحرير نصوص","مراجعة وتحرير"]},
  { key:"presentations", phrases:["powerpoint","power point","ppt","pptx","presentation","presentations","slide deck","slides","google slides","keynote presentation","pitch deck","presentation design","presentation formatting","academic presentation","business presentation","make a presentation","عروض تقديمية","عرض تقديمي","عرض بوربوينت","باوربوينت","باور بوينت","بوربوينت","عمل برزنتيشن","تصميم برزنتيشن","تصميم عرض تقديمي","اعداد عرض تقديمي","شرائح عرض","تنسيق شرائح","تجهيز شرائح","عرض جامعي","عرض اكاديمي","عرض تفاعلي","تحويل pdf الى powerpoint"]},
- { key:"cv_resume", phrases:["cv","resume","curriculum vitae","resume writing","cv writing","cv design","resume design","linkedin profile","cover letter","personal statement","job application documents","سيرة ذاتية","السيرة الذاتية","كتابة cv","تصميم cv","تنسيق cv","سي في","سى في","عمل cv","اعداد سيرة ذاتية","تطوير السيرة الذاتية","تحسين cv","تحسين لينكد ان","بروفايل لينكد ان","رسالة تغطية","خطاب تقديم","خطاب تعريفي","ملف تقديم وظيفي","سيرة ذاتية ats","cv ats","resume ats"]},
+ { key:"cv_resume", phrases:["cv","resume","curriculum vitae","resume writing","cv writing","cv design","resume design","linkedin profile","linkedin profile setup","set up linkedin profile","create linkedin profile","linkedin account setup","create a linkedin account","set up a linkedin account","linkedin account creation","cover letter","personal statement","job application documents","سيرة ذاتية","السيرة الذاتية","كتابة cv","تصميم cv","تنسيق cv","سي في","سى في","عمل cv","اعداد سيرة ذاتية","تطوير السيرة الذاتية","تحسين cv","تحسين لينكد ان","بروفايل لينكد ان","إنشاء حساب لينكدإن","انشاء حساب لينكدإن","انشاء حساب لينكد ان","إنشاء حساب لينكد ان","إنشاء حساب لينكدان","انشاء حساب لينكدان","إعداد حساب لينكدإن","اعداد حساب لينكد ان","إنشاء ملف لينكدإن","رسالة تغطية","خطاب تقديم","خطاب تعريفي","ملف تقديم وظيفي","سيرة ذاتية ats","cv ats","resume ats"]},
  { key:"pdf_documents", phrases:["pdf","edit pdf","pdf editing","pdf conversion","convert pdf","pdf to word","word to pdf","merge pdf","split pdf","compress pdf","reduce pdf size","scan to pdf","image to pdf","pdf to image","ocr","document formatting","format document","word document","ms word","microsoft word","docx","doc file","file conversion","convert files","document conversion","formatting documents","scan documents","fillable pdf","pdf form","تعديل pdf","تعديل ملف pdf","تعديل ملفات pdf","تحويل pdf","تحويل ملفات pdf","تحويل pdf الى word","تحويل وورد الى pdf","دمج pdf","دمج ملفات pdf","تقسيم pdf","ضغط pdf","تقليل حجم pdf","صور الى pdf","تحويل الصور الى pdf","مسح ضوئي","استخراج نص من pdf","استخراج النص من الصور","تنسيق ملف word","تنسيق ملف وورد","تنسيق ملفات word","تنسيق مستندات","تنسيق مستند","تحويل الملفات","تعبئة pdf","ملء نموذج pdf","تعديل ملفات وورد"]},
  { key:"data_entry", phrases:["data entry","data-entry","data input","data collection","copy typing","typing job","typing","database entry","data annotation","data labeling","data labelling","tagging data","web scraping data","lead list building","copy paste","copy and paste","manual data entry","product data entry","form filling","ادخال بيانات","ادخال البيانات","مدخل بيانات","تفريغ بيانات","نقل بيانات","نسخ ولصق","نسخ بيانات","كتابة بيانات","كتابة من صور","تحويل الصور الى نص","تحويل صورة الى نص","ادخال بيانات excel","ادخال بيانات على اكسل","تجميع بيانات","جمع بيانات","تصنيف بيانات يدويا","وسم البيانات","تعليم البيانات","تعبئة نماذج","ملء استمارات","ادخال استبيانات","تفريغ جداول"]},
  { key:"excel_office", phrases:["excel","microsoft excel","ms excel","google sheets","spreadsheet","spreadsheets","excel formatting","excel formulas","excel function","excel functions","excel template","excel spreadsheet","excel workbook","excel file","google sheet","worksheet formatting","conditional formatting","simple excel formulas","basic excel","data formatting","اكسل","اكسيل","جداول البيانات","جداول اكسل","ملف اكسل","ملف excel","تنسيق اكسل","تنسيق اكسيل","معادلات اكسل","معادلات excel","دوال اكسل","دوال excel","تنسيق جدول","تنسيق جداول","تنسيق شيت","جوجل شيتس","جوجل شيت","تنسيق جداول بيانات","عمل جدول اكسل","انشاء جدول اكسل","تعديل ملف اكسل","تعديل ملف excel"]},
@@ -1324,7 +1325,34 @@ function classifyChannelProject(project) {
     "بيع حسابات فيسبوك", "شراء حسابات فيسبوك", "انشاء حسابات متعددة",
     "إنشاء حسابات متعددة", "حسابات فيسبوك فعالة", "حسابات فيسبوك نشطة",
   ];
+  // A normal single-account setup can be a legitimate CV/profile service. Do not
+  // automatically publish bulk LinkedIn account-creation gigs, including titles
+  // that use singular Arabic wording followed by a minimum quantity requirement.
+  const linkedinAccountContext = allHas([
+    "linkedin account", "linkedin profile", "linkedin accounts", "لينكدان",
+    "لينكد ان", "لينكدإن", "حساب لينكد", "حساب على لينكد", "ملف لينكد"
+  ]);
+  const accountCreationIntent = allHas([
+    "create account", "create accounts", "account creation", "set up account",
+    "set up accounts", "make accounts", "إنشاء حساب", "انشاء حساب", "إنشاء حسابات",
+    "انشاء حسابات", "إعداد حساب", "اعداد حساب", "إنشاء ملف", "انشاء ملف"
+  ]) || /\b(?:create|creating|setup|register|open|make)\b.{0,50}\b(?:account|accounts|profile|profiles)\b/.test(all)
+     || /(?:انشاء|اعداد|تجهيز|فتح).{0,50}(?:حساب|حسابات|ملف)/.test(all);
+  const bulkQuantityIntent = allHas([
+    "bulk", "multiple", "several accounts", "many accounts", "mass account",
+    "number of accounts", "at least", "minimum number", "minimum of", "accounts per",
+    "dozens of accounts", "hundreds of accounts", "بعدد لا يقل", "عدد لا يقل",
+    "عدد كبير", "عدد من الحسابات", "حسابات متعددة", "حسابات بالجملة", "بأعداد",
+    "عشرات الحسابات", "مئات الحسابات", "عدد حسابات", "حساب لكل", "حسابات لينكد",
+    "حسابات لينكدان", "حسابات لينكد ان", "حسابات لينكدإن"
+  ]) || /\b\d+\s+(?:linkedin\s+)?(?:accounts|profiles)\b/.test(all)
+     || /(?:عدد لا يقل|لا يقل عن|على الاقل|حد ادنى).{0,20}\d+/.test(all)
+     || /\b\d+\s+(?:حساب|حسابات|ملف|ملفات)\b/.test(all);
   if (titleHas(hardOutOfScopeTitle) || titleHas(accountAbuseSignals)) return null;
+  if (linkedinAccountContext && accountCreationIntent && bulkQuantityIntent) {
+    console.log(`[category-channel] classifier=reject reason=bulk-linkedin-account-creation title=${String(project?.title || "").slice(0, 100)}`);
+    return null;
+  }
 
   // Very strong data/BI intent. Generic tools (Python, SQL, Excel) do not qualify
   // unless the title or the brief actually asks for analysis/reporting/BI output.
@@ -1372,7 +1400,7 @@ function classifyChannelProject(project) {
     {key:"ecommerce_listing", phrases:["upload products to", "add products to", "create product listings", "enter product listings", "رفع منتجات للمتجر", "ادخال منتجات المتجر"]},
     {key:"pdf_documents", phrases:["edit this pdf", "edit pdf files", "convert pdf to", "convert files to pdf", "merge pdf files", "split pdf", "compress pdf", "تحويل pdf", "تعديل ملف pdf", "دمج ملفات pdf", "ضغط ملف pdf"]},
     {key:"presentations", phrases:["create a powerpoint", "make a powerpoint", "prepare a presentation", "design a presentation", "create a slide deck", "prepare slides", "اعداد عرض تقديمي", "تصميم عرض تقديمي", "عمل عرض بوربوينت"]},
-    {key:"cv_resume", phrases:["write my cv", "create a cv", "write a resume", "design my resume", "prepare a cover letter", "كتابة سيرة ذاتية", "تصميم cv", "اعداد سيرة ذاتية"]},
+    {key:"cv_resume", phrases:["write my cv", "create a cv", "write a resume", "design my resume", "prepare a cover letter", "create a linkedin profile", "set up my linkedin profile", "help me set up my linkedin account", "create my linkedin account", "كتابة سيرة ذاتية", "تصميم cv", "اعداد سيرة ذاتية", "إنشاء حساب لينكدإن", "انشاء حساب لينكد ان", "إعداد بروفايل لينكدإن", "تحسين بروفايل لينكدإن"]},
     {key:"data_entry", phrases:["data entry task", "enter data into", "copy data into", "transfer data from", "manual data entry", "ادخال بيانات", "نقل بيانات الى", "نسخ البيانات الى"]},
     {key:"excel_office", phrases:["format an excel spreadsheet", "format excel file", "organize excel data", "create excel formulas", "clean up this spreadsheet", "تنسيق ملف اكسل", "تعديل ملف اكسل", "عمل معادلات اكسل"]},
     {key:"transcription_subtitles", phrases:["transcribe this audio", "transcribe audio files", "transcribe a video", "create subtitles", "add subtitles to", "convert audio to text", "تفريغ صوتي", "تفريغ تسجيل", "اضافة ترجمة للفيديو"]},
