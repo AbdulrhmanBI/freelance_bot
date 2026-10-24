@@ -6,6 +6,9 @@
 //   DB (D1), BOT_TOKEN, WEBHOOK_SECRET, ADMIN_KEY; ADMIN_ID optional
 // Cron: * * * * *
 // Telegram UI: clickable profile greeting only on /start; all inline buttons are English.
+// v8: reject video/audio-editing projects and non-Arabic speech collection at classification AND outbox-send time; purge stale queued items before sending.
+// v7: exclude all video montage/editing and audio-editing jobs from the specialized channel.
+// v6: voice-over and dubbing are accepted only when Arabic is explicitly required.
 // v5: classify legitimate single LinkedIn profile/account setup as CV services; reject bulk account creation.
 // v3: Khamsat requests are read from the public Telegram channel @KhamsatRequests.
 // v2: precise anti-bot detection (normal pages are no longer discarded), line-based extraction of
@@ -1142,7 +1145,7 @@ function extractSkills(plain) {
 // The specialized channel accepts two types of jobs:
 // 1) Real data analysis / BI work.
 // 2) General execution tasks (PDF, PowerPoint, CV, generic Excel, data entry,
-//    simple document work and social-media services).
+//    simple document work and social-media services). Video montage/editing and audio-editing jobs are excluded.
 // Python or SQL alone is NOT enough to classify a job as data analysis.
 // ---------------------------------------------------------------------
 const CHANNEL_CATEGORY_LABELS = {
@@ -1161,7 +1164,6 @@ const CHANNEL_CATEGORY_LABELS = {
   research_assistant: "بحث على الإنترنت ومساعد افتراضي",
   ecommerce_listing: "إدخال منتجات ومتاجر إلكترونية",
   basic_design: "تصميمات بسيطة وتعديل صور وقوالب",
-  video_audio: "مونتاج فيديو وتعديل صوت",
   customer_support: "خدمة عملاء ومتابعة ورسائل",
   forms_surveys: "نماذج واستبيانات وتجميع معلومات",
 };
@@ -1246,7 +1248,6 @@ const GENERAL_CATEGORIES = [
  { key:"research_assistant", phrases:["virtual assistant","virtual assistance","va services","administrative assistant","admin support","web research","internet research","online research","internet search","online search","internet data collection","research assistant","email management","calendar management","appointment scheduling","lead generation","lead research","email list building","list building","market research assistant","organize files","file organization","مساعد افتراضي","مساعدة افتراضية","مساعد اداري","بحث على الانترنت","بحث عبر الانترنت","بحث اونلاين","تجميع معلومات","جمع معلومات من الانترنت","بحث وجمع بيانات","البحث عبر الويب","ادارة البريد الالكتروني","تنظيم البريد","تنظيم ملفات","تنظيم مواعيد","جدولة مواعيد","دعم اداري","مساعدة ادارية","توليد عملاء محتملين","تجميع ايميلات","تجميع عناوين بريد"]},
  { key:"ecommerce_listing", phrases:["product listing","product upload","upload products","product catalog entry","product data entry","shopify product listing","shopify product upload","woocommerce product upload","woocommerce product listing","amazon product listing","ecommerce product upload","e-commerce product upload","catalog upload","store product entry","upload products to shopify","inventory listing","ادخال منتجات","رفع منتجات","اضافة منتجات للمتجر","رفع منتجات للمتجر","ادخال منتجات المتجر","رفع المنتجات","اضافة منتجات","ادخال كتالوج","اضافة منتجات شوبيفاي","رفع منتجات شوبيفاي","اضافة منتجات ووكومرس","رفع منتجات ووكومرس","ادخال بيانات المنتجات"]},
  { key:"basic_design", phrases:["canva template","edit canva template","canva thumbnail","thumbnail edit","remove background","background removal","image resizing","resize images","image editing","simple photo editing","thumbnail design","youtube thumbnail","social media post design","instagram post design","simple banner design","presentation template","edit template","photo retouching","كانفا","تصميم كانفا","تعديل قالب","تعديل قوالب","تعديل صور","تعديل صورة","قص الصور","قص صورة","ازالة الخلفية","حذف الخلفية","تغيير مقاس الصور","تغيير حجم الصور","تصميم صورة مصغرة","تصميم ثامبنيل","تصميم غلاف يوتيوب","تصميم منشورات السوشيال","تصميم بوست","تعديل قالب جاهز","تصميم بانر بسيط","تحسين جودة الصور","تعديل مقاسات الصور"]},
- { key:"video_audio", phrases:["video editing","edit video","video editor","short video editing","edit short reels","edit reels","reels editing","youtube shorts","tiktok video editing","cut video","trim video","merge video clips","podcast editing","audio editing","audio cleanup","noise removal audio","remove background noise","مونتاج فيديو","تعديل فيديو","تعديل مقاطع فيديو","قص فيديو","دمج مقاطع فيديو","مونتاج ريلز","مونتاج تيك توك","تعديل فيديو يوتيوب","مونتاج شورتس","تعديل صوت","مونتير محترف","مونتير","مونتير ريلز","مونتير تيك توك","مونتير لمقاطع الريلز","مونتاج مقاطع الريلز","مونتاج مقاطع تيك توك","مونتاج مقاطع قصيرة","مونتاج فيديوهات قصيرة","تحرير فيديوهات قصيرة","مونتاج شورت فيديو","تنقية الصوت","ازالة الضوضاء","تحسين جودة الصوت","تعديل بودكاست","مونتاج بودكاست"]},
  { key:"customer_support", phrases:["customer support","customer service","chat support","email support","answer customer messages","respond to customers","customer care","support agent","live chat agent","order follow up","خدمة عملاء","دعم العملاء","الرد على العملاء","الرد على رسائل العملاء","متابعة العملاء","متابعة الطلبات","خدمة العملاء عبر الشات","خدمة عملاء عن بعد","الرد على الاستفسارات","استقبال مكالمات","متابعة رسائل"]},
  { key:"forms_surveys", phrases:["survey data collection","online survey","survey creation","google form","google forms","microsoft forms","form creation","data collection form","questionnaire formatting","questionnaire creation","استبيان","استبيانات","عمل استبيان","تصميم استبيان","انشاء استبيان","تجميع نتائج الاستبيان","جمع بيانات استبيان","نماذج جوجل","جوجل فورمز","انشاء نموذج","انشاء فورم","تصميم نموذج الكتروني"]},
 ];
@@ -1261,6 +1262,89 @@ function classifyChannelProject(project) {
   const titleHas = (phrases) => categoryHasAny(title, phrases);
   const bodyHas = (phrases) => categoryHasAny(`${description} ${skills}`.trim(), phrases);
   const allHas = (phrases) => categoryHasAny(all, phrases);
+
+  // This channel does not publish video montage/editing or audio-editing projects.
+  // Reject before the other category rules so incidental Arabic writing/voiceover
+  // keywords cannot accidentally route an editing job into the channel.
+  const videoOrAudioEditingSignals = [
+    "video editing", "video editor", "video editors", "short video editing",
+    "short form video editor", "short-form video editor", "edit this video",
+    "edit video clips", "edit reels", "reels editing", "reel editor",
+    "tiktok video editing", "youtube shorts editing", "video montage", "video editor", "youtube video editor", "youtube editor", "documentary storytelling",
+    "montage video", "video post production", "video post-production", "animated map sequences", "map animations",
+    "podcast editing", "audio editing", "audio cleanup", "clean up audio recording", "audio production", "audio engineering",
+    "noise removal audio", "مونتاج", "مونتير", "تعديل فيديو", "تعديل مقاطع فيديو",
+    "تحرير فيديو", "قص فيديو", "دمج مقاطع فيديو", "مونتاج ريلز",
+    "مونتاج تيك توك", "مونتاج شورتس", "مونتاج مقاطع الريلز",
+    "مونتاج مقاطع تيك توك", "مونتاج فيديوهات قصيرة", "مونتاج مقاطع قصيرة",
+    "تعديل بودكاست", "تعديل صوت", "تنقية الصوت", "ازالة الضوضاء",
+    "تحسين جودة الصوت"
+  ];
+  const editingBodyIntent = [
+    "need a video editor", "looking for a video editor", "hire a video editor",
+    "edit this video", "edit video clips", "edit reels for tiktok",
+    "video editor for reels", "short form video editor", "edit a podcast",
+    "clean up audio recording", "edit the audio", "audio editing required",
+    "مطلوب مونتير", "محتاج مونتير", "مطلوب مونتاج", "مطلوب تعديل فيديو",
+    "عايز مونتاج", "عاوز مونتاج", "مطلوب تعديل الصوت", "تنقية الصوت"
+  ];
+  if (titleHas(videoOrAudioEditingSignals) || bodyHas(editingBodyIntent)) {
+    console.log(`[category-channel] classifier=reject reason=video-or-audio-editing-excluded title=${String(project?.title || "").slice(0, 100)}`);
+    return null;
+  }
+
+  // Voice-over / narration / dubbing jobs are only relevant to this channel
+  // when Arabic is explicitly required. A foreign-language voice request (for
+  // example, British English voice-over) must not get published just because
+  // voice services are generally included in the wider task list.
+  const voiceoverTitleSignals = [
+    "voiceover", "voice over", "voice-over", "voice over artist", "voice actor",
+    "voice acting", "voice talent", "voice narration", "audio narration", "narration",
+    "male voice", "female voice", "dubbing", "dub this", "voice recording",
+    "تعليق صوتي", "التعليق الصوتي", "معلق صوتي", "معلقة صوتية", "تسجيل صوتي",
+    "تسجيل اعلان صوتي", "تسجيل إعلاني", "فويس اوفر", "فويس أوفر", "دوبلاج",
+    "اداء صوتي", "أداء صوتي", "تسجيل كتب صوتية"
+  ];
+  const strongVoiceoverBodySignals = [
+    "need a voiceover artist", "looking for a voiceover artist", "hire a voiceover artist",
+    "record a voiceover", "record a voice over", "voiceover talent needed",
+    "voice-over recording", "voice narration required", "voice acting only",
+    "need a narrator", "looking for a narrator", "professional voice over",
+    "مطلوب معلق صوتي", "مطلوب تعليق صوتي", "تعليق صوتي فقط", "تسجيل فويس اوفر",
+    "مطلوب دوبلاج", "دوبلاج فقط", "تسجيل تعليق صوتي"
+  ];
+  const isPrimaryVoiceoverProject = titleHas(voiceoverTitleSignals) || bodyHas(strongVoiceoverBodySignals);
+  const explicitlyRequiresArabicVoice = allHas([
+    "arabic voiceover", "arabic voice over", "arabic voice-over", "voiceover in arabic",
+    "voice over in arabic", "voice-over in arabic", "arabic narration", "arabic voice talent",
+    "arabic voice actor", "arabic-speaking voice actor", "arabic speaking voiceover",
+    "arabic dubbing", "dubbing in arabic", "dub into arabic", "dub in arabic",
+    "record in arabic", "record the arabic version", "arabic-language voiceover",
+    "modern standard arabic voice", "msa voiceover", "egyptian arabic voiceover",
+    "levantine arabic voiceover", "gulf arabic voiceover", "native arabic voice",
+    "arabic male voice", "arabic female voice", "fluent arabic voice",
+    "تعليق صوتي عربي", "معلق صوتي عربي", "معلقة صوتية عربية", "تعليق صوتي باللغة العربية",
+    "معلق صوتي باللغة العربية", "مطلوب صوت عربي", "تسجيل صوتي بالعربية",
+    "تسجيل صوتي باللغة العربية", "دوبلاج عربي", "دبلجة عربية", "الدبلجة الى العربية",
+    "التعليق باللغة العربية", "فويس اوفر عربي", "فويس أوفر عربي", "باللهجة المصرية",
+    "باللهجة العربية", "بالفصحى العربية", "باللغة العربية"
+  ]);
+  if (isPrimaryVoiceoverProject && !explicitlyRequiresArabicVoice) {
+    console.log(`[category-channel] classifier=reject reason=voiceover-not-arabic title=${String(project?.title || "").slice(0, 100)}`);
+    return null;
+  }
+  // Dataset-style speech collection in a named non-Arabic language is not an Arabic voice-over job.
+  const nonArabicSpeechCollection = [
+    "tatar voice recording", "tatar speakers", "tatar speaker", "bashkir voice recording",
+    "bashkir speakers", "bashkir speaker", "kazakh voice recording", "uzbek voice recording",
+    "kyrgyz voice recording", "mongolian voice recording", "welsh voice recording",
+    "native speakers needed", "voice recording contributors", "record voice scripts",
+    "record pre-provided short scripts", "speech data collection", "voice data collection"
+  ];
+  if (!explicitlyRequiresArabicVoice && allHas(nonArabicSpeechCollection)) {
+    console.log(`[category-channel] classifier=reject reason=non-arabic-speech-data title=${String(project?.title || "").slice(0, 100)}`);
+    return null;
+  }
 
   // High-risk financial-document replication: do not route requests to recreate
   // realistic bank statements with editable transaction rows or indistinguishable styling.
@@ -1382,7 +1466,7 @@ function classifyChannelProject(project) {
     "ecommerce_listing", "pdf_documents", "presentations", "cv_resume", "data_entry",
     "excel_office", "transcription_subtitles", "translation", "proofreading",
     "arabic_content", "social_media", "research_assistant", "customer_support",
-    "forms_surveys", "basic_design", "video_audio", "voiceover_audio"
+    "forms_surveys", "basic_design", "voiceover_audio"
   ];
   for (const key of titlePriority) {
     const category = GENERAL_CATEGORIES.find((item) => item.key === key);
@@ -1412,7 +1496,6 @@ function classifyChannelProject(project) {
     {key:"customer_support", phrases:["respond to customer messages", "provide customer support", "answer customer inquiries", "customer service agent needed", "الرد على رسائل العملاء", "خدمة عملاء", "الرد على استفسارات العملاء"]},
     {key:"forms_surveys", phrases:["create a google form", "create an online survey", "build a questionnaire", "collect survey responses", "انشاء استبيان", "تصميم نموذج جوجل", "جمع نتائج الاستبيان"]},
     {key:"basic_design", phrases:["remove image background", "edit images for", "resize a batch of images", "edit a canva template", "ازالة خلفية الصور", "تعديل صور", "تعديل قالب كانفا"]},
-    {key:"video_audio", phrases:["edit this video", "edit video clips", "edit a podcast", "clean up audio recording", "video editor for reels", "edit reels for tiktok", "short form video editor", "مونتاج فيديو", "تعديل مقاطع فيديو", "مونتاج مقاطع الريلز", "مونتاج مقاطع تيك توك", "مونتاج مقاطع فيديو قصيرة", "مونتير محترف لمقاطع الريلز", "مونتير محترف لمقاطع الريلز بالتيك توك", "مونتير ريلز", "مونتير تيك توك", "تنقية الصوت"]},
     {key:"voiceover_audio", phrases:["record a voiceover", "need a voiceover artist", "record voice narration", "provide voice acting only", "dub this video", "تعليق صوتي فقط", "تسجيل فويس اوفر", "مطلوب معلق صوتي", "دوبلاج فقط"]},
   ];
   for (const intent of directIntent) {
@@ -1622,6 +1705,35 @@ async function enqueueAndSave(env, pending, stateUpdates, pendingChannel = []) {
   console.log(`[db] queuedProjects=${pending.length}; queuedRecipients=${pending.reduce((sum, project) => sum + project.chatIds.length, 0)}; queuedChannelMessages=${pendingChannel.length}; stateUpdates=${Object.keys(stateUpdates).length}`);
 }
 
+function isDisallowedQueuedChannelMessage(messageText) {
+  const text = normalizeCategoryText(String(messageText || "").replace(/<[^>]*>/g, " "));
+  const videoAudioBlock = [
+    "video editor", "video editing", "youtube video editor", "youtube editor", "video post production",
+    "video post-production", "documentary storytelling", "video editing services", "video montage",
+    "animated map sequences", "map animations", "مونتاج", "مونتير", "تعديل فيديو", "تحرير فيديو",
+    "video services", "after effects", "motion graphics", "video post-editing", "video editing required",
+    "audio editing", "audio production", "audio engineering", "audio cleanup", "podcast editing",
+    "تعديل صوت", "تنقية الصوت", "تحسين جودة الصوت"
+  ];
+  if (categoryHasAny(text, videoAudioBlock)) return "video-or-audio-editing-excluded";
+  const voiceJob = categoryHasAny(text, [
+    "voice over", "voice-over", "voiceover", "voice talent", "voice acting", "voice recording",
+    "voice recording contributors", "تعليق صوتي", "معلق صوتي", "تسجيل صوتي", "دوبلاج"
+  ]);
+  const arabicVoice = categoryHasAny(text, [
+    "arabic voiceover", "arabic voice over", "arabic voice-over", "voiceover in arabic",
+    "voice over in arabic", "arabic narration", "arabic voice talent", "record in arabic",
+    "arabic-language voiceover", "egyptian arabic voiceover", "native arabic voice",
+    "تعليق صوتي عربي", "تعليق صوتي باللغة العربية", "تسجيل صوتي بالعربية", "باللهجة المصرية", "باللغة العربية"
+  ]);
+  if (voiceJob && !arabicVoice) return "voiceover-not-arabic";
+  if (!arabicVoice && categoryHasAny(text, [
+    "tatar voice recording", "tatar speakers", "tatar speaker", "bashkir voice recording",
+    "bashkir speakers", "bashkir speaker", "record pre-provided short scripts", "voice recording contributors"
+  ])) return "non-arabic-speech-data";
+  return null;
+}
+
 async function flushChannelOutbox(env) {
   const channelId = String(env.JOBS_CHANNEL_ID || "").trim();
   if (!channelId) return;
@@ -1635,6 +1747,12 @@ async function flushChannelOutbox(env) {
   ).all();
   console.log(`[category-channel] rowsToProcess=${results.length}; channel=${channelId}`);
   for (const row of results) {
+    const rejectReason = isDisallowedQueuedChannelMessage(row.text);
+    if (rejectReason) {
+      await env.DB.prepare("DELETE FROM channel_outbox WHERE id = ?1").bind(row.id).run();
+      console.warn(`[category-channel] dropped queued message id=${row.id} key=${row.msg_key} reason=${rejectReason}`);
+      continue;
+    }
     try {
       await sendMessage(env, row.channel_id, row.text);
       await env.DB.prepare("DELETE FROM channel_outbox WHERE id = ?1").bind(row.id).run();
