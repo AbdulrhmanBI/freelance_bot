@@ -1194,7 +1194,11 @@ const DATA_ANALYSIS_STRONG = [
   "data reporting", "sales analytics", "financial analytics", "customer analytics", "marketing analytics",
   "retail analytics", "data cleaning", "data cleansing", "data wrangling", "exploratory data analysis",
   "statistical analysis", "predictive analytics", "forecasting model", "time series analysis",
-  "customer segmentation", "cohort analysis", "ab testing analysis", "تحليل البيانات", "تحليل بيانات",
+  "customer segmentation", "cohort analysis", "ab testing analysis", "marketing dashboard", "operations dashboard",
+  "supply chain analytics", "logistics analytics", "inventory analytics", "retention analysis", "churn analysis",
+  "profitability analysis", "variance analysis", "financial modeling", "financial modelling", "forecast model",
+  "تحليل سلاسل الامداد", "تحليل المخزون", "تحليل الربحية", "تحليل الانحرافات", "تحليل الاحتفاظ بالعملاء",
+  "تحليل فقدان العملاء", "تحليل العمليات", "تحليل لوجستي", "تحليل سلسلة الامداد", "تحليل البيانات", "تحليل بيانات",
   "تحليل الداتا", "محلل بيانات", "محلل البيانات", "محلله بيانات", "تحليلات البيانات", "علم البيانات",
   "ذكاء الاعمال", "تحليل احصائي", "تحليل المبيعات", "تحليل مالي", "تحليل الاداء", "تحليل العملاء",
   "تحليل التسويق", "تحليل بيانات العملاء", "تحليل بيانات المبيعات", "تحليل بيانات مالية",
@@ -1230,7 +1234,7 @@ const GENERAL_CATEGORIES = [
  { key:"transcription_subtitles", phrases:["transcription","audio transcription","video transcription","transcribe audio","transcribe video","speech to text","audio to text","voice to text","arabic transcription","english transcription","meeting transcription","interview transcription","lecture transcription","podcast transcription","verbatim transcription","subtitles","subtitle creation","subtitle editing","captions","closed captions","srt subtitles","srt file","vtt captions","captioning","transcript writing","تفريغ صوتي","تفريغ فيديو","تفريغ محاضرات","تفريغ مقابلات","تفريغ اجتماع","تفريغ تسجيلات","تحويل الصوت الى نص","تحويل الصوت لنص","تحويل الكلام الى نص","كتابة الكلام المسموع","تفريغ عربي","تفريغ انجليزي","اضافة ترجمة للفيديو","ترجمة مرئية","ملف srt","تفريغ بودكاست"]},
  { key:"voiceover_audio", phrases:["voiceover","voice over","voice-over","voice over artist","voice actor","voice acting","voice talent","voice recording","voice narration","narration","audio narration","arabic voice over","arabic voiceover","english voiceover","female voiceover","male voiceover","commercial voice over","ivr recording","audiobook narration","dubbing","voice dub","تعليق صوتي","التعليق الصوتي","معلق صوتي","معلقة صوتية","معلق صوتي عربي","تعليق صوتي عربي","تعليق صوتي انجليزي","تسجيل صوتي","تسجيل اعلان صوتي","تسجيل إعلاني","تسجيل فويس اوفر","فويس اوفر","فويس أوفر","دوبلاج","اداء صوتي","أداء صوتي","تسجيل كتب صوتية","تعليق للفيديو","قراءة نص صوتيا"]},
  { key:"translation", phrases:["translation","translate","translator","translating","translation services","arabic translation","english arabic translation","arabic english translation","translate to arabic","translate to english","localization","localisation","website translation","document translation","subtitle translation","ترجمة","مترجم","ترجمة عربية","ترجمة انجليزي","ترجمة من العربية","ترجمة من الانجليزية","ترجمة من الانجليزي للعربي","ترجمة من العربي للانجليزي","ترجمة ملفات","ترجمة مستندات","ترجمة فيديو","تعريب","تعريب محتوى","تعريب موقع","ترجمة نصوص","ترجمة مقالات"]},
- { key:"arabic_content", phrases:["arabic writing","arabic content","arabic copywriting","content writing","copywriting","article writing","blog writing","blog post","product description writing","product descriptions","script writing","social media captions","ad copy","writing in arabic","arabic writer","seo content writing","website content","creative writing","content creation","كتابة باللغة العربية","الكتابة باللغة العربية","كتابة محتوى","محتوى عربي","كتابة محتوى عربي","كاتب محتوى","كتابة مقالات","كتابة مقال","كتابة تدوينات","كتابة بوستات","كتابة منشورات","كتابة اعلانات","صياغة اعلانية","كتابة وصف منتجات","وصف المنتجات","كتابة محتوى تسويقي","كتابة سكريبت","كتابة نصوص اعلانية","صياغة المحتوى","كتابة محتوى لموقع","كتابة محتوى للسوشيال ميديا","كتابة محتوى متوافق مع السيو"]},
+ { key:"arabic_content", phrases:["arabic writing","write arabic articles","arabic articles","write articles in arabic","arabic content","arabic copywriting","content writing","copywriting","article writing","blog writing","blog post","product description writing","product descriptions","script writing","social media captions","ad copy","writing in arabic","arabic writer","seo content writing","website content","creative writing","content creation","كتابة باللغة العربية","الكتابة باللغة العربية","كتابة محتوى","محتوى عربي","كتابة محتوى عربي","كاتب محتوى","كتابة مقالات","كتابة مقال","كتابة تدوينات","كتابة بوستات","كتابة منشورات","كتابة اعلانات","صياغة اعلانية","كتابة وصف منتجات","وصف المنتجات","كتابة محتوى تسويقي","كتابة سكريبت","كتابة نصوص اعلانية","صياغة المحتوى","كتابة محتوى لموقع","كتابة محتوى للسوشيال ميديا","كتابة محتوى متوافق مع السيو"]},
  { key:"proofreading", phrases:["proofreading","proofreader","proofread","copy editing","copy edit","grammar check","spell check","spelling correction","text editing","editing arabic text","arabic proofreading","language review","formatting text","diacritics","arabic diacritics","تدقيق لغوي","تدقيق املائي","مراجعة لغوية","مراجعة النصوص","مراجعة نص","تصحيح لغوي","تصحيح املائي","تصحيح الاخطاء","ضبط التشكيل","تشكيل النص","تشكيل الكلمات","اضافة التشكيل","تنسيق النصوص","تحرير نصوص","مراجعة وتحرير"]},
  { key:"presentations", phrases:["powerpoint","power point","ppt","pptx","presentation","presentations","slide deck","slides","google slides","keynote presentation","pitch deck","presentation design","presentation formatting","academic presentation","business presentation","make a presentation","عروض تقديمية","عرض تقديمي","عرض بوربوينت","باوربوينت","باور بوينت","بوربوينت","عمل برزنتيشن","تصميم برزنتيشن","تصميم عرض تقديمي","اعداد عرض تقديمي","شرائح عرض","تنسيق شرائح","تجهيز شرائح","عرض جامعي","عرض اكاديمي","عرض تفاعلي","تحويل pdf الى powerpoint"]},
  { key:"cv_resume", phrases:["cv","resume","curriculum vitae","resume writing","cv writing","cv design","resume design","linkedin profile","cover letter","personal statement","job application documents","سيرة ذاتية","السيرة الذاتية","كتابة cv","تصميم cv","تنسيق cv","سي في","سى في","عمل cv","اعداد سيرة ذاتية","تطوير السيرة الذاتية","تحسين cv","تحسين لينكد ان","بروفايل لينكد ان","رسالة تغطية","خطاب تقديم","خطاب تعريفي","ملف تقديم وظيفي","سيرة ذاتية ats","cv ats","resume ats"]},
@@ -1240,10 +1244,10 @@ const GENERAL_CATEGORIES = [
  { key:"social_media", phrases:["social media management","social media manager","social media marketing","social media engagement","social engagement","engagement campaign","increase engagement","increase followers","likes and comments","instagram engagement","facebook engagement","tiktok engagement","youtube engagement","followers","likes","comments","shares","post scheduling","community management","manage instagram account","manage facebook page","manage tiktok account","social media posting","content calendar","سوشيال ميديا","وسائل التواصل الاجتماعي","ادارة حسابات التواصل","ادارة صفحات","ادارة صفحة فيسبوك","ادارة انستجرام","زيادة التفاعل","زيادة تفاعل","زيادة المتابعين","زيادة اللايكات","زيادة الاعجابات","لايكات","اعجابات","تعليقات","متابعين","تفاعل على فيسبوك","تفاعل على انستجرام","تفاعل على تيك توك","تفاعل على السوشيال ميديا","نشر بوستات","جدولة منشورات","ادارة محتوى السوشيال","نشر محتوى","تفاعل انستجرام","تفاعل تيك توك","تفاعل يوتيوب","تسويق عبر السوشيال ميديا"]},
  { key:"research_assistant", phrases:["virtual assistant","virtual assistance","va services","administrative assistant","admin support","web research","internet research","online research","internet search","online search","internet data collection","research assistant","email management","calendar management","appointment scheduling","lead generation","lead research","email list building","list building","market research assistant","organize files","file organization","مساعد افتراضي","مساعدة افتراضية","مساعد اداري","بحث على الانترنت","بحث عبر الانترنت","بحث اونلاين","تجميع معلومات","جمع معلومات من الانترنت","بحث وجمع بيانات","البحث عبر الويب","ادارة البريد الالكتروني","تنظيم البريد","تنظيم ملفات","تنظيم مواعيد","جدولة مواعيد","دعم اداري","مساعدة ادارية","توليد عملاء محتملين","تجميع ايميلات","تجميع عناوين بريد"]},
  { key:"ecommerce_listing", phrases:["product listing","product upload","upload products","product catalog entry","product data entry","shopify product listing","shopify product upload","woocommerce product upload","woocommerce product listing","amazon product listing","ecommerce product upload","e-commerce product upload","catalog upload","store product entry","upload products to shopify","inventory listing","ادخال منتجات","رفع منتجات","اضافة منتجات للمتجر","رفع منتجات للمتجر","ادخال منتجات المتجر","رفع المنتجات","اضافة منتجات","ادخال كتالوج","اضافة منتجات شوبيفاي","رفع منتجات شوبيفاي","اضافة منتجات ووكومرس","رفع منتجات ووكومرس","ادخال بيانات المنتجات"]},
- { key:"basic_design", phrases:["canva template","edit canva template","remove background","background removal","image resizing","resize images","image editing","simple photo editing","thumbnail design","youtube thumbnail","social media post design","instagram post design","simple banner design","presentation template","edit template","photo retouching","كانفا","تصميم كانفا","تعديل قالب","تعديل قوالب","تعديل صور","تعديل صورة","قص الصور","قص صورة","ازالة الخلفية","حذف الخلفية","تغيير مقاس الصور","تغيير حجم الصور","تصميم صورة مصغرة","تصميم ثامبنيل","تصميم غلاف يوتيوب","تصميم منشورات السوشيال","تصميم بوست","تعديل قالب جاهز","تصميم بانر بسيط","تحسين جودة الصور","تعديل مقاسات الصور"]},
- { key:"video_audio", phrases:["video editing","edit video","video editor","short video editing","reels editing","youtube shorts","tiktok video editing","cut video","trim video","merge video clips","podcast editing","audio editing","audio cleanup","noise removal audio","remove background noise","مونتاج فيديو","تعديل فيديو","تعديل مقاطع فيديو","قص فيديو","دمج مقاطع فيديو","مونتاج ريلز","مونتاج تيك توك","تعديل فيديو يوتيوب","مونتاج شورتس","تعديل صوت","تنقية الصوت","ازالة الضوضاء","تحسين جودة الصوت","تعديل بودكاست","مونتاج بودكاست"]},
+ { key:"basic_design", phrases:["canva template","edit canva template","canva thumbnail","thumbnail edit","remove background","background removal","image resizing","resize images","image editing","simple photo editing","thumbnail design","youtube thumbnail","social media post design","instagram post design","simple banner design","presentation template","edit template","photo retouching","كانفا","تصميم كانفا","تعديل قالب","تعديل قوالب","تعديل صور","تعديل صورة","قص الصور","قص صورة","ازالة الخلفية","حذف الخلفية","تغيير مقاس الصور","تغيير حجم الصور","تصميم صورة مصغرة","تصميم ثامبنيل","تصميم غلاف يوتيوب","تصميم منشورات السوشيال","تصميم بوست","تعديل قالب جاهز","تصميم بانر بسيط","تحسين جودة الصور","تعديل مقاسات الصور"]},
+ { key:"video_audio", phrases:["video editing","edit video","video editor","short video editing","edit short reels","edit reels","reels editing","youtube shorts","tiktok video editing","cut video","trim video","merge video clips","podcast editing","audio editing","audio cleanup","noise removal audio","remove background noise","مونتاج فيديو","تعديل فيديو","تعديل مقاطع فيديو","قص فيديو","دمج مقاطع فيديو","مونتاج ريلز","مونتاج تيك توك","تعديل فيديو يوتيوب","مونتاج شورتس","تعديل صوت","مونتير محترف","مونتير","مونتير ريلز","مونتير تيك توك","مونتير لمقاطع الريلز","مونتاج مقاطع الريلز","مونتاج مقاطع تيك توك","مونتاج مقاطع قصيرة","مونتاج فيديوهات قصيرة","تحرير فيديوهات قصيرة","مونتاج شورت فيديو","تنقية الصوت","ازالة الضوضاء","تحسين جودة الصوت","تعديل بودكاست","مونتاج بودكاست"]},
  { key:"customer_support", phrases:["customer support","customer service","chat support","email support","answer customer messages","respond to customers","customer care","support agent","live chat agent","order follow up","خدمة عملاء","دعم العملاء","الرد على العملاء","الرد على رسائل العملاء","متابعة العملاء","متابعة الطلبات","خدمة العملاء عبر الشات","خدمة عملاء عن بعد","الرد على الاستفسارات","استقبال مكالمات","متابعة رسائل"]},
- { key:"forms_surveys", phrases:["survey data collection","online survey","survey creation","google forms","microsoft forms","form creation","data collection form","questionnaire formatting","questionnaire creation","استبيان","استبيانات","عمل استبيان","تصميم استبيان","انشاء استبيان","تجميع نتائج الاستبيان","جمع بيانات استبيان","نماذج جوجل","جوجل فورمز","انشاء نموذج","انشاء فورم","تصميم نموذج الكتروني"]},
+ { key:"forms_surveys", phrases:["survey data collection","online survey","survey creation","google form","google forms","microsoft forms","form creation","data collection form","questionnaire formatting","questionnaire creation","استبيان","استبيانات","عمل استبيان","تصميم استبيان","انشاء استبيان","تجميع نتائج الاستبيان","جمع بيانات استبيان","نماذج جوجل","جوجل فورمز","انشاء نموذج","انشاء فورم","تصميم نموذج الكتروني"]},
 ];
 
 function classifyChannelProject(project) {
@@ -1257,6 +1261,29 @@ function classifyChannelProject(project) {
   const bodyHas = (phrases) => categoryHasAny(`${description} ${skills}`.trim(), phrases);
   const allHas = (phrases) => categoryHasAny(all, phrases);
 
+  // High-risk financial-document replication: do not route requests to recreate
+  // realistic bank statements with editable transaction rows or indistinguishable styling.
+  // This is deliberately narrower than ordinary PDF/Word/Excel editing.
+  const financialDocumentReplication = [
+    "bank statement template", "editable bank statement", "recreate bank statement",
+    "rebuild bank statement", "replica bank statement", "indistinguishable bank statement",
+    "mirror the original statement", "editable transaction rows", "bank statement clone",
+    "td bank statement", "bank statement pdf editable", "كشف حساب بنكي قابل للتعديل",
+    "انشاء كشف حساب بنكي", "إعادة إنشاء كشف حساب بنكي", "تقليد كشف حساب بنكي",
+    "كشف حساب مطابق للاصل", "كشف حساب بنكي قابل للتحرير", "تعديل معاملات كشف الحساب"
+  ];
+  const financialDocumentContext = allHas(["bank statement", "bank statements", "td bank", "كشف حساب بنكي", "كشف حساب مصرفي"]);
+  const replicationIntent = allHas([
+    "indistinguishable from the source", "indistinguishable from original", "look exactly like the original",
+    "mirror the supplied statement", "every transaction row", "editable transaction rows",
+    "recreate the statement", "rebuild the statement", "fully editable statement",
+    "مطابق تماما للاصل", "مطابق للنسخة الاصلية", "كل المعاملات قابلة للتعديل", "كشف حساب قابل للتعديل"
+  ]);
+  if (titleHas(financialDocumentReplication) || (financialDocumentContext && replicationIntent)) {
+    console.log(`[category-channel] classifier=reject reason=financial-document-replication title=${String(project?.title || "").slice(0, 100)}`);
+    return null;
+  }
+
   // PRINCIPLE: classify the actual deliverable, not any incidental word in the
   // description or the source site's often-wrong category. A title signal wins.
   // If the title describes an unrelated specialist deliverable, secondary words
@@ -1265,8 +1292,8 @@ function classifyChannelProject(project) {
     // Legal / litigation
     "motion for extension", "motion to extend", "party deposition", "deposition deadline",
     "rules of civil procedure", "court scheduling order", "proposed court order",
-    "legal motion", "legal writing", "legal research", "court filing", "litigation support",
-    "مذكرة قانونية", "بحث قانوني", "صياغة قانونية", "مستندات قضائية", "مرافعة قانونية",
+    "legal motion", "legal writing", "legal research", "legal article", "legal content", "law firm article", "law firm content", "court filing", "litigation support",
+    "مذكرة قانونية", "بحث قانوني", "صياغة قانونية", "مستندات قضائية", "مرافعة قانونية", "مقال قانوني", "كتابة قانونية",
     // Game development
     "roblox developer", "roblox game", "game development", "game developer", "game design",
     "game programmer", "game programming", "game mechanics", "video game", "mobile game",
@@ -1280,10 +1307,24 @@ function classifyChannelProject(project) {
     // Other unrelated specialist work
     "website development", "web development", "web developer", "mobile app development",
     "software development", "software engineer", "backend development", "frontend development",
+    "machine learning engineer", "ai engineer", "blockchain developer", "smart contract developer",
+    "game art", "game asset", "character modeling", "3d artist", "3d animator", "architectural rendering",
+    "مطور ذكاء اصطناعي", "تعلم الآلة", "بلوك تشين", "تطوير عقود ذكية", "فنان ثلاثي الابعاد",
     "3d modeling", "3d modelling", "architectural design", "mechanical engineering",
     "تطوير مواقع", "برمجة مواقع", "تطوير تطبيقات", "تطوير برمجيات", "نمذجة ثلاثية الابعاد",
   ];
-  if (titleHas(hardOutOfScopeTitle)) return null;
+  // Bulk creation/sale of social accounts is not a normal social-media service.
+  // Exclude it rather than accidentally accepting it as account management or engagement.
+  const accountAbuseSignals = [
+    "create facebook accounts", "create 25 facebook accounts", "bulk facebook accounts",
+    "facebook accounts for sale", "buy facebook accounts", "aged facebook accounts",
+    "fake facebook accounts", "multiple facebook accounts", "bulk social media accounts",
+    "account farming", "mass account creation", "create multiple accounts",
+    "انشاء حسابات فيسبوك", "إنشاء حسابات فيسبوك", "حسابات فيسبوك جاهزة",
+    "بيع حسابات فيسبوك", "شراء حسابات فيسبوك", "انشاء حسابات متعددة",
+    "إنشاء حسابات متعددة", "حسابات فيسبوك فعالة", "حسابات فيسبوك نشطة",
+  ];
+  if (titleHas(hardOutOfScopeTitle) || titleHas(accountAbuseSignals)) return null;
 
   // Very strong data/BI intent. Generic tools (Python, SQL, Excel) do not qualify
   // unless the title or the brief actually asks for analysis/reporting/BI output.
@@ -1343,7 +1384,7 @@ function classifyChannelProject(project) {
     {key:"customer_support", phrases:["respond to customer messages", "provide customer support", "answer customer inquiries", "customer service agent needed", "الرد على رسائل العملاء", "خدمة عملاء", "الرد على استفسارات العملاء"]},
     {key:"forms_surveys", phrases:["create a google form", "create an online survey", "build a questionnaire", "collect survey responses", "انشاء استبيان", "تصميم نموذج جوجل", "جمع نتائج الاستبيان"]},
     {key:"basic_design", phrases:["remove image background", "edit images for", "resize a batch of images", "edit a canva template", "ازالة خلفية الصور", "تعديل صور", "تعديل قالب كانفا"]},
-    {key:"video_audio", phrases:["edit this video", "edit video clips", "edit a podcast", "clean up audio recording", "مونتاج فيديو", "تعديل مقاطع فيديو", "تنقية الصوت"]},
+    {key:"video_audio", phrases:["edit this video", "edit video clips", "edit a podcast", "clean up audio recording", "video editor for reels", "edit reels for tiktok", "short form video editor", "مونتاج فيديو", "تعديل مقاطع فيديو", "مونتاج مقاطع الريلز", "مونتاج مقاطع تيك توك", "مونتاج مقاطع فيديو قصيرة", "مونتير محترف لمقاطع الريلز", "مونتير محترف لمقاطع الريلز بالتيك توك", "مونتير ريلز", "مونتير تيك توك", "تنقية الصوت"]},
     {key:"voiceover_audio", phrases:["record a voiceover", "need a voiceover artist", "record voice narration", "provide voice acting only", "dub this video", "تعليق صوتي فقط", "تسجيل فويس اوفر", "مطلوب معلق صوتي", "دوبلاج فقط"]},
   ];
   for (const intent of directIntent) {
@@ -1502,7 +1543,7 @@ async function run(env) {
           });
           console.log(`[category-channel] site=${site.key} project=${item.id} category=${category.key} reason=${category.reason} queued=true`);
         } else {
-          console.log(`[category-channel] site=${site.key} project=${item.id} category=none reason=no-category-match`);
+          console.log(`[category-channel] site=${site.key} project=${item.id} category=none reason=no-confident-primary-service; title=${String(full.title || "").slice(0, 100)}`);
         }
       }
     }
