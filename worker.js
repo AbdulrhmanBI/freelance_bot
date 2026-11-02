@@ -1,3 +1,4 @@
+// v11: strip the unwanted data-entry category line at formatting and final Telegram-send boundaries.
 // =====================================================================
 // Freelance Jobs Bot — Cloudflare Workers + Cron + D1
 // Sites: Kafiil, Mostaql, Nafezly (public Telegram feed), Khamsat, Freelancer
@@ -1542,20 +1543,38 @@ function classifyChannelProject(project) {
   // default is deliberate: a smaller, relevant channel is better than noise.
   return null;
 }
+function stripDataEntryCategoryLine(messageText) {
+  // Remove the unwanted data-entry category label from every outgoing job post,
+  // including messages that were already stored in channel_outbox before deploy.
+  const targetLabel = normalizeCategoryText("إدخال بيانات ونسخ وكتابة");
+  return String(messageText ?? "")
+    .split(/\r?\n/)
+    .filter((line) => {
+      const plainLine = line.replace(/<[^>]*>/g, " ");
+      const normalizedLine = normalizeCategoryText(plainLine);
+      const isCategoryLine = normalizedLine.includes("المجال") || line.includes("🗂");
+      const isUnwantedLabel = normalizedLine.includes(targetLabel);
+      return !(isCategoryLine && isUnwantedLabel);
+    })
+    .join("\n")
+    .replace(/\n{3,}/g, "\n\n");
+}
+
 function formatChannelMessage(site, project, category) {
   // The source site's category can be inaccurate (e.g. a social-media project
   // mislabeled as Arabic content). Remove it and show only our content-based
   // classifier's category in the dedicated channel.
-  const lines = formatMessage(site, project).split("\n").filter((line) =>
+  const lines = stripDataEntryCategoryLine(formatMessage(site, project)).split("\n").filter((line) =>
     !/^\s*🗂\s*(?:<b>)?المجال(?:<\/b>)?\s*[:：]/i.test(line)
   );
-  // Do not display the data-entry category line in any channel message.
-  // The underlying project can still be published; only this metadata line is hidden.
-  if (category?.key !== "data_entry") {
+  const labelIsDataEntry = normalizeCategoryText(category?.label || "")
+    .includes(normalizeCategoryText("إدخال بيانات ونسخ وكتابة"));
+  // Never add this label, even if an upstream classifier returns an unexpected key.
+  if (category?.key !== "data_entry" && !labelIsDataEntry) {
     // Place the corrected category near the top, immediately after the source line.
     lines.splice(Math.min(2, lines.length), 0, `🗂 <b>المجال:</b> ${esc(category.label)}`);
   }
-  return lines.join("\n");
+  return stripDataEntryCategoryLine(lines.join("\n"));
 }
 
 // ---------------------------------------------------------------------
@@ -2802,7 +2821,9 @@ async function tg(env, method, payload) {
 
 const sendMessage = (env, chat_id, text, extra = {}) => tg(env, "sendMessage", {
   chat_id,
-  text,
+  // Final outbound safeguard: strips the exact unwanted category line from
+  // channel posts, private job alerts, queued retries, and plain-text fallbacks.
+  text: stripDataEntryCategoryLine(text),
   parse_mode: "HTML",
   disable_web_page_preview: true,
   ...extra,
