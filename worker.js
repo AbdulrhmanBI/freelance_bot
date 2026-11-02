@@ -6,7 +6,8 @@
 //   DB (D1), BOT_TOKEN, WEBHOOK_SECRET, ADMIN_KEY; ADMIN_ID optional
 // Cron: * * * * *
 // Telegram UI: clickable profile greeting only on /start; all inline buttons are English.
-// v9: reject design/graphic/thumbnail/photo-editing and video/audio-editing jobs at classification AND outbox-send time; purge stale queued items before sending.
+// v9: translation jobs are accepted only when Arabic is explicitly one of the requested source/target languages; enforce at classification and outbox-send time.
+// v8: reject video/audio-editing projects and non-Arabic speech collection at classification AND outbox-send time; purge stale queued items before sending.
 // v7: exclude all video montage/editing and audio-editing jobs from the specialized channel.
 // v6: voice-over and dubbing are accepted only when Arabic is explicitly required.
 // v5: classify legitimate single LinkedIn profile/account setup as CV services; reject bulk account creation.
@@ -1163,6 +1164,7 @@ const CHANNEL_CATEGORY_LABELS = {
   social_media: "سوشيال ميديا وتفاعل وإدارة حسابات",
   research_assistant: "بحث على الإنترنت ومساعد افتراضي",
   ecommerce_listing: "إدخال منتجات ومتاجر إلكترونية",
+  basic_design: "تصميمات بسيطة وتعديل صور وقوالب",
   customer_support: "خدمة عملاء ومتابعة ورسائل",
   forms_surveys: "نماذج واستبيانات وتجميع معلومات",
 };
@@ -1246,9 +1248,29 @@ const GENERAL_CATEGORIES = [
  { key:"social_media", phrases:["social media management","social media manager","social media marketing","social media engagement","social engagement","engagement campaign","increase engagement","increase followers","likes and comments","instagram engagement","facebook engagement","tiktok engagement","youtube engagement","followers","likes","comments","shares","post scheduling","community management","manage instagram account","manage facebook page","manage tiktok account","social media posting","content calendar","سوشيال ميديا","وسائل التواصل الاجتماعي","ادارة حسابات التواصل","ادارة صفحات","ادارة صفحة فيسبوك","ادارة انستجرام","زيادة التفاعل","زيادة تفاعل","زيادة المتابعين","زيادة اللايكات","زيادة الاعجابات","لايكات","اعجابات","تعليقات","متابعين","تفاعل على فيسبوك","تفاعل على انستجرام","تفاعل على تيك توك","تفاعل على السوشيال ميديا","نشر بوستات","جدولة منشورات","ادارة محتوى السوشيال","نشر محتوى","تفاعل انستجرام","تفاعل تيك توك","تفاعل يوتيوب","تسويق عبر السوشيال ميديا"]},
  { key:"research_assistant", phrases:["virtual assistant","virtual assistance","va services","administrative assistant","admin support","web research","internet research","online research","internet search","online search","internet data collection","research assistant","email management","calendar management","appointment scheduling","lead generation","lead research","email list building","list building","market research assistant","organize files","file organization","مساعد افتراضي","مساعدة افتراضية","مساعد اداري","بحث على الانترنت","بحث عبر الانترنت","بحث اونلاين","تجميع معلومات","جمع معلومات من الانترنت","بحث وجمع بيانات","البحث عبر الويب","ادارة البريد الالكتروني","تنظيم البريد","تنظيم ملفات","تنظيم مواعيد","جدولة مواعيد","دعم اداري","مساعدة ادارية","توليد عملاء محتملين","تجميع ايميلات","تجميع عناوين بريد"]},
  { key:"ecommerce_listing", phrases:["product listing","product upload","upload products","product catalog entry","product data entry","shopify product listing","shopify product upload","woocommerce product upload","woocommerce product listing","amazon product listing","ecommerce product upload","e-commerce product upload","catalog upload","store product entry","upload products to shopify","inventory listing","ادخال منتجات","رفع منتجات","اضافة منتجات للمتجر","رفع منتجات للمتجر","ادخال منتجات المتجر","رفع المنتجات","اضافة منتجات","ادخال كتالوج","اضافة منتجات شوبيفاي","رفع منتجات شوبيفاي","اضافة منتجات ووكومرس","رفع منتجات ووكومرس","ادخال بيانات المنتجات"]},
+ { key:"basic_design", phrases:["canva template","edit canva template","canva thumbnail","thumbnail edit","remove background","background removal","image resizing","resize images","image editing","simple photo editing","thumbnail design","youtube thumbnail","social media post design","instagram post design","simple banner design","presentation template","edit template","photo retouching","كانفا","تصميم كانفا","تعديل قالب","تعديل قوالب","تعديل صور","تعديل صورة","قص الصور","قص صورة","ازالة الخلفية","حذف الخلفية","تغيير مقاس الصور","تغيير حجم الصور","تصميم صورة مصغرة","تصميم ثامبنيل","تصميم غلاف يوتيوب","تصميم منشورات السوشيال","تصميم بوست","تعديل قالب جاهز","تصميم بانر بسيط","تحسين جودة الصور","تعديل مقاسات الصور"]},
  { key:"customer_support", phrases:["customer support","customer service","chat support","email support","answer customer messages","respond to customers","customer care","support agent","live chat agent","order follow up","خدمة عملاء","دعم العملاء","الرد على العملاء","الرد على رسائل العملاء","متابعة العملاء","متابعة الطلبات","خدمة العملاء عبر الشات","خدمة عملاء عن بعد","الرد على الاستفسارات","استقبال مكالمات","متابعة رسائل"]},
  { key:"forms_surveys", phrases:["survey data collection","online survey","survey creation","google form","google forms","microsoft forms","form creation","data collection form","questionnaire formatting","questionnaire creation","استبيان","استبيانات","عمل استبيان","تصميم استبيان","انشاء استبيان","تجميع نتائج الاستبيان","جمع بيانات استبيان","نماذج جوجل","جوجل فورمز","انشاء نموذج","انشاء فورم","تصميم نموذج الكتروني"]},
 ];
+
+function explicitlyRequestsArabicTranslation(text) {
+  const t = normalizeCategoryText(String(text || ""));
+  // Require Arabic to be an actual requested language, not merely the channel's
+  // generic category label ("ترجمة وتعريب") or unrelated Arabic UI text.
+  return categoryHasAny(t, [
+    "arabic to english", "english to arabic", "translate to arabic", "translate into arabic",
+    "translate from arabic", "translation into arabic", "translation from arabic",
+    "arabic translation", "arabic translator", "arabic language", "arabic version",
+    "from english to arabic", "from arabic to english", "arabic source text", "arabic target language",
+    "ترجمة الى العربية", "ترجمة إلى العربية", "ترجمة للعربية", "ترجمة من العربية",
+    "ترجمة من الانجليزية الى العربية", "ترجمة من الإنجليزية إلى العربية",
+    "ترجمة من العربية الى الانجليزية", "ترجمة من العربية إلى الإنجليزية",
+    "من الانجليزية للعربية", "من الإنجليزية للعربية", "من العربية للانجليزية", "من العربية للإنجليزية",
+    "اللغة العربية", "باللغة العربية", "النص العربي", "مترجم عربي", "مترجمة عربية",
+    "ترجمة عربي", "ترجمة عربية", "تعريب المحتوى", "تعريب الموقع", "تعريب المتجر",
+    "من العربي الى", "من العربية الى", "الى اللغة العربية", "إلى اللغة العربية"
+  ]);
+}
 
 function classifyChannelProject(project) {
   const title = normalizeCategoryText(project?.title || "");
@@ -1259,42 +1281,7 @@ function classifyChannelProject(project) {
 
   const titleHas = (phrases) => categoryHasAny(title, phrases);
   const bodyHas = (phrases) => categoryHasAny(`${description} ${skills}`.trim(), phrases);
-  const descriptionHas = (phrases) => categoryHasAny(description, phrases);
   const allHas = (phrases) => categoryHasAny(all, phrases);
-
-  // The channel does not publish design, graphic-art, thumbnails, photo editing,
-  // logos/branding, illustrations, or design-template jobs. Check the actual title
-  // and requested deliverables, not the source site's possibly-misleading skill tags.
-  // Data/BI dashboard work remains eligible when the title clearly identifies it
-  // as a data-analysis deliverable.
-  const designWorkSignals = [
-    "design", "designer", "designing", "graphic design", "graphic designer", "thumbnail", "youtube thumbnail", "thumbnail designer",
-    "cinematic thumbnail", "thumbnail design", "design thumbnails", "logo design", "logo designer",
-    "design a logo", "brand identity design", "branding design", "branding designer",
-    "poster design", "flyer design", "brochure design", "banner design", "social media post design",
-    "instagram post design", "facebook post design", "ad creative design", "advertising creative design",
-    "photo editing", "image editing", "photo retouching", "image retouching", "photo manipulation",
-    "remove background", "background removal", "image resizing", "resize images", "canva template",
-    "edit canva template", "photoshop editing", "adobe photoshop", "adobe illustrator",
-    "illustration", "illustrator", "caricature", "cartoon design", "digital art", "visual design",
-    "animation", "animator", "2d animation", "3d animation", "motion graphics", "logo animation",
-    "graphic artwork", "icon design", "ui design", "ux design", "ui ux design", "web design",
-    "presentation design", "presentation designer", "design a presentation", "slide deck design",
-    "slide design", "cv design", "resume design", "cv designer", "resume designer",
-    "تصميم", "مصمم", "جرافيك", "تصميم جرافيك", "تصميم صورة مصغرة", "تصميم ثامبنيل",
-    "تصميم غلاف يوتيوب", "صورة مصغرة", "تصميم شعار", "تصميم لوجو", "هوية بصرية",
-    "تصميم بنر", "تصميم بوستر", "تصميم فلاير", "تصميم منشورات", "تصميم بوست",
-    "تعديل صور", "تعديل صورة", "قص الصور", "قص صورة", "ازالة الخلفية", "حذف الخلفية",
-    "كانفا", "فوتوشوب", "اليستريتور", "رسوم توضيحية", "رسم توضيحي", "رسم كاريكاتير",
-    "فن رقمي", "تصميم واجهات", "تصميم ui", "تصميم ux", "تصميم عرض تقديمي",
-    "انيميشن", "تحريك", "موشن جرافيك",
-    "تصميم برزنتيشن", "تصميم شرائح", "تصميم سلايدات", "تصميم cv", "تصميم السيرة الذاتية"
-  ];
-  const strongAnalysisTitleForDesignOverride = titleHas(DATA_ANALYSIS_STRONG);
-  if (!strongAnalysisTitleForDesignOverride && (titleHas(designWorkSignals) || descriptionHas(designWorkSignals))) {
-    console.log(`[category-channel] classifier=reject reason=design-work-excluded title=${String(project?.title || "").slice(0, 100)}`);
-    return null;
-  }
 
   // This channel does not publish video montage/editing or audio-editing projects.
   // Reject before the other category rules so incidental Arabic writing/voiceover
@@ -1499,11 +1486,18 @@ function classifyChannelProject(project) {
     "ecommerce_listing", "pdf_documents", "presentations", "cv_resume", "data_entry",
     "excel_office", "transcription_subtitles", "translation", "proofreading",
     "arabic_content", "social_media", "research_assistant", "customer_support",
-    "forms_surveys", "voiceover_audio"
+    "forms_surveys", "basic_design", "voiceover_audio"
   ];
   for (const key of titlePriority) {
     const category = GENERAL_CATEGORIES.find((item) => item.key === key);
     if (category && titleHas(category.phrases)) {
+      // Translation is in-scope only when Arabic is explicitly named as a
+      // requested source/target language. Generic/multilingual translation
+      // projects (e.g. Spanish + French + German) must never enter this channel.
+      if (key === "translation" && !explicitlyRequestsArabicTranslation(all)) {
+        console.log(`[category-channel] classifier=reject reason=translation-not-explicitly-arabic title=${String(project?.title || "").slice(0, 100)}`);
+        return null;
+      }
       return {
         key:category.key, label:CHANNEL_CATEGORY_LABELS[category.key],
         reason:`explicit-title:${category.key}`, group:"general_tasks"
@@ -1528,10 +1522,15 @@ function classifyChannelProject(project) {
     {key:"research_assistant", phrases:["web research task", "research information online", "collect information from websites", "virtual assistant needed", "بحث على الانترنت", "جمع معلومات من المواقع", "مساعد افتراضي"]},
     {key:"customer_support", phrases:["respond to customer messages", "provide customer support", "answer customer inquiries", "customer service agent needed", "الرد على رسائل العملاء", "خدمة عملاء", "الرد على استفسارات العملاء"]},
     {key:"forms_surveys", phrases:["create a google form", "create an online survey", "build a questionnaire", "collect survey responses", "انشاء استبيان", "تصميم نموذج جوجل", "جمع نتائج الاستبيان"]},
+    {key:"basic_design", phrases:["remove image background", "edit images for", "resize a batch of images", "edit a canva template", "ازالة خلفية الصور", "تعديل صور", "تعديل قالب كانفا"]},
     {key:"voiceover_audio", phrases:["record a voiceover", "need a voiceover artist", "record voice narration", "provide voice acting only", "dub this video", "تعليق صوتي فقط", "تسجيل فويس اوفر", "مطلوب معلق صوتي", "دوبلاج فقط"]},
   ];
   for (const intent of directIntent) {
     if (!bodyHas(intent.phrases)) continue;
+    if (intent.key === "translation" && !explicitlyRequestsArabicTranslation(all)) {
+      console.log(`[category-channel] classifier=reject reason=translation-not-explicitly-arabic title=${String(project?.title || "").slice(0, 100)}`);
+      return null;
+    }
     const category = GENERAL_CATEGORIES.find((item) => item.key === intent.key);
     if (category) return {
       key:category.key, label:CHANNEL_CATEGORY_LABELS[category.key],
@@ -1738,31 +1737,11 @@ async function enqueueAndSave(env, pending, stateUpdates, pendingChannel = []) {
 }
 
 function isDisallowedQueuedChannelMessage(messageText) {
-  const rawText = String(messageText || "").replace(/<[^>]*>/g, " ");
-  const text = normalizeCategoryText(rawText);
-  // Skills/category keywords from marketplace tags are noisy; remove the skills
-  // line for design matching, but keep the bot's corrected category line so older
-  // queued basic-design items can still be recognized and dropped.
-  const primaryText = normalizeCategoryText(rawText.split("\n").filter((line) => !/^\s*🏷/.test(line)).join(" "));
-  const designBlock = [
-    "تصميمات بسيطة", "تعديل صور وقوالب", "design", "designer", "designing", "graphic design", "graphic designer",
-    "youtube thumbnail", "thumbnail designer", "thumbnail design", "thumbnail",
-    "logo design", "logo designer", "brand identity design", "branding design",
-    "poster design", "flyer design", "brochure design", "banner design",
-    "photo editing", "image editing", "photo retouching", "image retouching",
-    "photo manipulation", "background removal", "remove background",
-    "canva template", "edit canva template", "adobe photoshop", "adobe illustrator",
-    "illustration", "caricature", "digital art", "visual design", "icon design",
-    "animation", "animator", "2d animation", "3d animation", "motion graphics", "logo animation",
-    "ui design", "ux design", "ui ux design", "web design",
-    "presentation design", "presentation designer", "slide deck design", "slide design",
-    "cv design", "resume design", "تصميم", "مصمم", "جرافيك", "صورة مصغرة",
-    "تصميم شعار", "تصميم لوجو", "هوية بصرية", "تصميم بنر", "تعديل صور",
-    "ازالة الخلفية", "كانفا", "فوتوشوب", "اليستريتور", "رسوم توضيحية",
-    "رسم كاريكاتير", "فن رقمي", "تصميم واجهات", "تصميم عرض تقديمي", "تصميم شرائح",
-    "انيميشن", "تحريك", "موشن جرافيك"
-  ];
-  if (categoryHasAny(primaryText, designBlock)) return "design-work-excluded";
+  const text = normalizeCategoryText(String(messageText || "").replace(/<[^>]*>/g, " "));
+  // Outbox defense: reject stale/legacy translation rows unless Arabic is
+  // explicitly one of the requested languages in the actual project text.
+  const translationCategory = categoryHasAny(text, ["ترجمة وتعريب", "translation and localization", "translation and localisation"]);
+  if (translationCategory && !explicitlyRequestsArabicTranslation(text)) return "translation-not-explicitly-arabic";
   const videoAudioBlock = [
     "video editor", "video editing", "youtube video editor", "youtube editor", "video post production",
     "video post-production", "documentary storytelling", "video editing services", "video montage",
