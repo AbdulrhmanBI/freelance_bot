@@ -1549,8 +1549,12 @@ function formatChannelMessage(site, project, category) {
   const lines = formatMessage(site, project).split("\n").filter((line) =>
     !/^\s*🗂\s*(?:<b>)?المجال(?:<\/b>)?\s*[:：]/i.test(line)
   );
-  // Place the corrected category near the top, immediately after the source line.
-  lines.splice(Math.min(2, lines.length), 0, `🗂 <b>المجال:</b> ${esc(category.label)}`);
+  // Do not display the data-entry category line in any channel message.
+  // The underlying project can still be published; only this metadata line is hidden.
+  if (category?.key !== "data_entry") {
+    // Place the corrected category near the top, immediately after the source line.
+    lines.splice(Math.min(2, lines.length), 0, `🗂 <b>المجال:</b> ${esc(category.label)}`);
+  }
   return lines.join("\n");
 }
 
